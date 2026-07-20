@@ -5,6 +5,7 @@ const POINTS_PER_CORRECT = 10;
 const TICK_MS = 250;
 
 let pictureVocabulary = [];
+let baseVocabulary = []; // built-in HSK list (without user words)
 let currentSetWords = [];
 let slots = [];
 let score = 0;
@@ -17,6 +18,118 @@ let practicedWords = [];  // for post-game review / learning
 let customWords = [];     // words extracted from user-pasted reading
 let currentImageMap = {}; // hanzi -> url (from online search) or null (meaning only, no picture)
 let unselectedHanzi = new Set(); // for user to unselect words from the extracted set
+
+const USER_VOCAB_KEY = 'chinese-user-vocabulary-v1';
+
+/** Load user-added words from localStorage. */
+function loadUserVocabulary() {
+  try {
+    const raw = localStorage.getItem(USER_VOCAB_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((w) => w && typeof w.hanzi === 'string' && w.hanzi.trim())
+      .map((w) => ({
+        hanzi: String(w.hanzi).trim(),
+        pinyin: String(w.pinyin || '').trim(),
+        meaning: String(w.meaning || '').trim(),
+        level: Math.min(6, Math.max(1, Number(w.level) || 3)),
+        userAdded: true,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function saveUserVocabulary(list) {
+  try {
+    const clean = (list || []).map((w) => ({
+      hanzi: w.hanzi,
+      pinyin: w.pinyin || '',
+      meaning: w.meaning || '',
+      level: w.level || 3,
+    }));
+    localStorage.setItem(USER_VOCAB_KEY, JSON.stringify(clean));
+  } catch (e) {
+    console.warn('Could not save user vocabulary', e);
+  }
+}
+
+/** Rebuild pictureVocabulary = built-in + user words (user wins on same hanzi). */
+function rebuildVocabularyWithUserWords() {
+  const userWords = loadUserVocabulary();
+  const byHanzi = new Map();
+  for (const w of baseVocabulary) {
+    if (w && w.hanzi) byHanzi.set(w.hanzi, { ...w, userAdded: false });
+  }
+  for (const w of userWords) {
+    byHanzi.set(w.hanzi, { ...w, userAdded: true });
+  }
+  pictureVocabulary = Array.from(byHanzi.values());
+  return userWords;
+}
+
+function findWordInLibrary(hanzi) {
+  const key = (hanzi || '').trim();
+  if (!key) return null;
+  return pictureVocabulary.find((w) => w.hanzi === key) || null;
+}
+
+function normalizeNewWord({ hanzi, pinyin, meaning, level }) {
+  return {
+    hanzi: String(hanzi || '').trim(),
+    pinyin: String(pinyin || '').trim(),
+    meaning: String(meaning || '').trim(),
+    level: Math.min(6, Math.max(1, Number(level) || 3)),
+    userAdded: true,
+  };
+}
+
+/**
+ * Add a user word if not already in the library.
+ * @returns {{ ok: boolean, reason?: string, word?: object, existing?: object }}
+ */
+function addUserWord(input) {
+  const word = normalizeNewWord(input);
+  if (!word.hanzi) return { ok: false, reason: 'Please enter a Chinese word.' };
+  if (!/[\u4e00-\u9fff]/.test(word.hanzi)) {
+    return { ok: false, reason: 'Chinese field should include at least one Chinese character.' };
+  }
+  if (!word.pinyin) return { ok: false, reason: 'Please enter pinyin.' };
+  if (!word.meaning) return { ok: false, reason: 'Please enter an English meaning.' };
+
+  const existing = findWordInLibrary(word.hanzi);
+  if (existing) {
+    return {
+      ok: false,
+      reason: existing.userAdded
+        ? `“${word.hanzi}” is already in your added words.`
+        : `“${word.hanzi}” is already in the HSK library (HSK ${existing.level}).`,
+      existing,
+    };
+  }
+
+  const userWords = loadUserVocabulary();
+  userWords.push({
+    hanzi: word.hanzi,
+    pinyin: word.pinyin,
+    meaning: word.meaning,
+    level: word.level,
+  });
+  saveUserVocabulary(userWords);
+  rebuildVocabularyWithUserWords();
+  return { ok: true, word };
+}
+
+function removeUserWord(hanzi) {
+  const key = (hanzi || '').trim();
+  if (!key) return false;
+  const next = loadUserVocabulary().filter((w) => w.hanzi !== key);
+  saveUserVocabulary(next);
+  rebuildVocabularyWithUserWords();
+  return true;
+}
 
 // Sample lessons for integration: Reading first, then practice words from it
 const LESSONS = [
@@ -1109,7 +1222,8 @@ function bindKeyboardControls() {
 }
 
 function initPictureGame(vocabulary) {
-  pictureVocabulary = vocabulary;
+  baseVocabulary = Array.isArray(vocabulary) ? vocabulary.slice() : [];
+  rebuildVocabularyWithUserWords();
   loadHighScore();
   bindGridClicks();
   bindKeyboardControls();
@@ -1253,11 +1367,13 @@ function initPictureGame(vocabulary) {
   const customFlow = document.getElementById('custom-flow');
   const practicePanel = document.getElementById('practice-panel');
   const setsFlow = document.getElementById('sets-flow');
+  const addWordsFlow = document.getElementById('add-words-flow');
 
   function showMenu() {
     if (menuView) menuView.style.display = '';
     if (customFlow) customFlow.style.display = 'none';
     if (setsFlow) setsFlow.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = 'none';
     if (practicePanel) practicePanel.style.display = 'none';
     // hide game if open
     const gameScreen = document.getElementById('picture-game-screen');
@@ -1268,9 +1384,78 @@ function initPictureGame(vocabulary) {
     if (hint) hint.style.display = 'none';
   }
 
+  function setAddWordStatus(msg, isError = false) {
+    const el = document.getElementById('add-word-status');
+    if (!el) return;
+    el.innerHTML = msg || '';
+    el.style.color = isError ? 'var(--accent)' : '';
+  }
+
+  function renderUserWordsList() {
+    const listEl = document.getElementById('user-words-list');
+    const countEl = document.getElementById('user-words-count');
+    const userWords = loadUserVocabulary();
+    if (countEl) {
+      countEl.textContent = `${userWords.length} saved in this browser`;
+    }
+    if (!listEl) return;
+    if (!userWords.length) {
+      listEl.innerHTML = '<p class="user-words-empty">No custom words yet. Add one above — it will be used in reading extract and practice sets.</p>';
+      return;
+    }
+    const sorted = [...userWords].sort((a, b) => {
+      if (a.level !== b.level) return a.level - b.level;
+      return a.hanzi.localeCompare(b.hanzi, 'zh');
+    });
+    listEl.innerHTML = `<ul>${sorted.map((w) => {
+      const meaning = (w.meaning || '').replace(/</g, '&lt;');
+      const pinyin = (w.pinyin || '').replace(/</g, '&lt;');
+      const hanzi = (w.hanzi || '').replace(/"/g, '&quot;');
+      return `<li>
+        <div class="user-word-meta">
+          <span class="hanzi">${w.hanzi}</span>
+          <span class="pinyin">(${pinyin})</span>
+          <span class="meaning">— ${meaning} <em>(HSK ${w.level} · yours)</em></span>
+        </div>
+        <button type="button" class="remove-user-word" data-hanzi="${hanzi}">Remove</button>
+      </li>`;
+    }).join('')}</ul>`;
+
+    listEl.querySelectorAll('.remove-user-word').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const h = btn.dataset.hanzi;
+        if (!h) return;
+        if (!confirm(`Remove “${h}” from your library?`)) return;
+        removeUserWord(h);
+        renderUserWordsList();
+        updatePictureSetOptions();
+        setAddWordStatus(`Removed “${h}”.`);
+      });
+    });
+  }
+
+  function showAddWords() {
+    if (menuView) menuView.style.display = 'none';
+    if (customFlow) customFlow.style.display = 'none';
+    if (setsFlow) setsFlow.style.display = 'none';
+    if (practicePanel) practicePanel.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = '';
+    const hint = document.querySelector('.picture-highscore-hint');
+    if (hint) hint.style.display = 'none';
+    const gameScreen = document.getElementById('picture-game-screen');
+    const gameOver = document.getElementById('picture-gameover');
+    if (gameScreen) gameScreen.hidden = true;
+    if (gameOver) gameOver.hidden = true;
+    setAddWordStatus('');
+    renderUserWordsList();
+    const hanziInput = document.getElementById('add-hanzi');
+    if (hanziInput) hanziInput.focus();
+  }
+
   function showCustom() {
     if (menuView) menuView.style.display = 'none';
     if (setsFlow) setsFlow.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = 'none';
     if (customFlow) customFlow.style.display = '';
     if (practicePanel) practicePanel.style.display = '';
     // Make sure paste area is always visible for custom (also after a previous game)
@@ -1304,6 +1489,7 @@ function initPictureGame(vocabulary) {
   function showSets() {
     if (menuView) menuView.style.display = 'none';
     if (customFlow) customFlow.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = 'none';
     if (setsFlow) setsFlow.style.display = '';
     if (practicePanel) practicePanel.style.display = '';
 
@@ -1369,11 +1555,73 @@ function initPictureGame(vocabulary) {
   const startSetsBtn = document.getElementById('start-sets-btn');
   if (startSetsBtn) startSetsBtn.addEventListener('click', showSets);
 
+  const startAddWordsBtn = document.getElementById('start-add-words-btn');
+  if (startAddWordsBtn) startAddWordsBtn.addEventListener('click', showAddWords);
+
   const backCustom = document.getElementById('back-from-custom');
   if (backCustom) backCustom.addEventListener('click', showMenu);
 
   const backSets = document.getElementById('back-from-sets');
   if (backSets) backSets.addEventListener('click', showMenu);
+
+  const backAddWords = document.getElementById('back-from-add-words');
+  if (backAddWords) backAddWords.addEventListener('click', showMenu);
+
+  // ---- Add-your-own-words form ----
+  const addWordForm = document.getElementById('add-word-form');
+  const addWordCheckBtn = document.getElementById('add-word-check');
+
+  function readAddWordForm() {
+    return {
+      hanzi: (document.getElementById('add-hanzi')?.value || '').trim(),
+      pinyin: (document.getElementById('add-pinyin')?.value || '').trim(),
+      meaning: (document.getElementById('add-meaning')?.value || '').trim(),
+      level: Number(document.getElementById('add-level')?.value || 3),
+    };
+  }
+
+  if (addWordCheckBtn) {
+    addWordCheckBtn.addEventListener('click', () => {
+      const { hanzi } = readAddWordForm();
+      if (!hanzi) {
+        setAddWordStatus('Enter a Chinese word to check.', true);
+        return;
+      }
+      const existing = findWordInLibrary(hanzi);
+      if (!existing) {
+        setAddWordStatus(`“${hanzi}” is <strong>not</strong> in the library — you can add it.`);
+        return;
+      }
+      const src = existing.userAdded ? 'your added words' : `the HSK library (HSK ${existing.level})`;
+      setAddWordStatus(
+        `Already in ${src}: <strong>${existing.hanzi}</strong> (${existing.pinyin || '—'}) — ${existing.meaning || ''}`
+      );
+    });
+  }
+
+  if (addWordForm) {
+    addWordForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const data = readAddWordForm();
+      const result = addUserWord(data);
+      if (!result.ok) {
+        setAddWordStatus(result.reason || 'Could not add word.', true);
+        return;
+      }
+      setAddWordStatus(
+        `✅ Added <strong>${result.word.hanzi}</strong> (${result.word.pinyin}) — ${result.word.meaning}`
+      );
+      const hanziEl = document.getElementById('add-hanzi');
+      const pinyinEl = document.getElementById('add-pinyin');
+      const meaningEl = document.getElementById('add-meaning');
+      if (hanziEl) hanziEl.value = '';
+      if (pinyinEl) pinyinEl.value = '';
+      if (meaningEl) meaningEl.value = '';
+      if (hanziEl) hanziEl.focus();
+      renderUserWordsList();
+      updatePictureSetOptions();
+    });
+  }
 
   // Make the game "back to menu" button go to menu
   const backMenuBtn = document.getElementById('back-menu-btn');

@@ -30,7 +30,7 @@
         <div class="menu-intro">
           <h2>Practice Chinese Vocabulary</h2>
           <p>Build your Chinese word recognition with fun matching games.<br>
-          Two ways to practice:</p>
+          Practice with readings, ready-made sets, or words you add yourself:</p>
         </div>
 
         <div class="menu-cards">
@@ -47,9 +47,65 @@
             <p>Choose HSK levels and play with pre-grouped vocabulary sets. Perfect for regular daily practice.</p>
             <button id="start-sets-btn" class="btn btn-learned btn-large">Browse practice sets</button>
           </div>
+
+          <div class="menu-card">
+            <div class="menu-icon">➕</div>
+            <h3>Add your own words</h3>
+            <p>If a word is missing from the library, add Chinese, pinyin, and English meaning. Saved in this browser and usable in extract + practice sets.</p>
+            <button id="start-add-words-btn" class="btn btn-learned btn-large">Add words to library</button>
+          </div>
         </div>
 
         <p class="menu-hint">Tip: Match Chinese words with their English meanings. Correct answers reveal pinyin too.</p>
+      </div>
+
+      <!-- ADD WORDS FLOW -->
+      <div id="add-words-flow" style="display:none;">
+        <button class="back-btn" id="back-from-add-words">← Back to menu</button>
+
+        <div class="section-header">
+          <strong>Add words to your library</strong>
+          <span class="hint">Only new words are saved. Duplicates of existing HSK or your own words are skipped.</span>
+        </div>
+
+        <form id="add-word-form" class="add-word-form">
+          <div class="add-word-fields">
+            <label class="add-field">
+              <span>Chinese (汉字)</span>
+              <input type="text" id="add-hanzi" required placeholder="例如：加油" autocomplete="off" maxlength="20">
+            </label>
+            <label class="add-field">
+              <span>Pinyin</span>
+              <input type="text" id="add-pinyin" required placeholder="jiā yóu" autocomplete="off" maxlength="60">
+            </label>
+            <label class="add-field add-field-wide">
+              <span>English meaning</span>
+              <input type="text" id="add-meaning" required placeholder="come on; keep it up" autocomplete="off" maxlength="200">
+            </label>
+            <label class="add-field">
+              <span>HSK level</span>
+              <select id="add-level">
+                <option value="1">HSK 1</option>
+                <option value="2">HSK 2</option>
+                <option value="3" selected>HSK 3</option>
+                <option value="4">HSK 4</option>
+                <option value="5">HSK 5</option>
+                <option value="6">HSK 6</option>
+              </select>
+            </label>
+          </div>
+          <div class="extract-actions">
+            <button type="submit" class="btn btn-primary" id="add-word-submit">Add word</button>
+            <button type="button" class="btn btn-secondary" id="add-word-check">Check if exists</button>
+          </div>
+          <div id="add-word-status" class="extract-info" aria-live="polite"></div>
+        </form>
+
+        <div class="section-header" style="margin-top:1.25rem;">
+          <strong>Your added words</strong>
+          <span class="hint" id="user-words-count">0 saved in this browser</span>
+        </div>
+        <div id="user-words-list" class="extracted-list user-words-list"></div>
       </div>
 
       <!-- CUSTOM READING FLOW -->
