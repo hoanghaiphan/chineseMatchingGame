@@ -258,20 +258,115 @@ function wordKey(word) {
   return `${word.hanzi}|${word.pinyin}`;
 }
 
-function getLocalImage(word) {
-  // Local images disabled — game is text-only (hanzi + English meaning).
-  return null;
+const USER_IMAGE_OVERRIDES_KEY = 'chinese-user-image-overrides-v1';
+const ONLINE_IMAGE_CACHE_KEY = 'chinese-game-image-cache-v3';
+
+/** User image overrides: { [hanzi]: string URL | null }. null = force no picture. */
+function loadImageOverrides() {
+  try {
+    const raw = localStorage.getItem(USER_IMAGE_OVERRIDES_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch {
+    return {};
+  }
 }
 
-/** Always text-only: Chinese label + English meaning (no pictures). */
+function saveImageOverrides(map) {
+  try {
+    localStorage.setItem(USER_IMAGE_OVERRIDES_KEY, JSON.stringify(map || {}));
+  } catch (e) {
+    console.warn('Could not save image overrides', e);
+  }
+}
+
+/**
+ * Set override for a hanzi.
+ * url: https URL string, null for "no image", undefined to clear override (restore default).
+ */
+function setImageOverride(hanzi, url) {
+  const key = (hanzi || '').trim();
+  if (!key) return;
+  const map = loadImageOverrides();
+  if (url === undefined) {
+    delete map[key];
+  } else if (url === null) {
+    map[key] = null;
+  } else {
+    const s = String(url).trim();
+    if (!/^https:\/\//i.test(s)) {
+      throw new Error('Image URL must start with https://');
+    }
+    map[key] = s;
+  }
+  saveImageOverrides(map);
+}
+
+let _wordImageByHanzi = null;
+function getBuiltInImageIndex() {
+  if (_wordImageByHanzi) return _wordImageByHanzi;
+  _wordImageByHanzi = new Map();
+  if (typeof WORD_IMAGES === 'undefined' || !WORD_IMAGES) return _wordImageByHanzi;
+  for (const [k, entry] of Object.entries(WORD_IMAGES)) {
+    const url = typeof entry === 'string' ? entry : (entry && entry.url);
+    if (!url) continue;
+    const hanzi = k.includes('|') ? k.split('|')[0] : k;
+    if (!_wordImageByHanzi.has(hanzi)) _wordImageByHanzi.set(hanzi, url);
+    // Prefer exact hanzi|pinyin later via direct lookup
+  }
+  return _wordImageByHanzi;
+}
+
+function getBuiltInImageUrl(word) {
+  if (typeof WORD_IMAGES === 'undefined' || !WORD_IMAGES || !word) return null;
+  const fullKey = `${word.hanzi}|${word.pinyin || ''}`;
+  const entry = WORD_IMAGES[fullKey];
+  if (entry) {
+    if (typeof entry === 'string') return entry || null;
+    if (entry.url) return entry.url;
+  }
+  return getBuiltInImageIndex().get(word.hanzi) || null;
+}
+
+/**
+ * Picture lookup priority:
+ * 1) user override (localStorage) — URL or forced null
+ * 2) built-in WORD_IMAGES (images.js)
+ * 3) session / live resolve map (currentImageMap)
+ * 4) text fallback (English meaning)
+ */
 function getWordImage(word) {
   const meaning = (word.meaning || '').replace(/;/g, '; ').trim();
+  const hanzi = word.hanzi || '';
+  const overrides = loadImageOverrides();
+
+  let url = null;
+  let source = 'none';
+
+  if (Object.prototype.hasOwnProperty.call(overrides, hanzi)) {
+    url = overrides[hanzi]; // may be null = force text
+    source = 'user';
+  } else {
+    url = getBuiltInImageUrl(word);
+    if (url) source = 'builtin';
+    else if (hanzi && currentImageMap[hanzi]) {
+      url = currentImageMap[hanzi];
+      source = 'online';
+    } else if (hanzi && currentImageMap[hanzi] === null) {
+      url = null;
+      source = 'online-miss';
+    }
+  }
+
+  const hasUrl = !!(url && String(url).trim());
   return {
-    url: null,
-    label: word.hanzi,
-    picturable: false,
-    showMeaning: true,
-    meaning: meaning
+    url: hasUrl ? url : null,
+    label: hanzi,
+    picturable: hasUrl,
+    showMeaning: !hasUrl,
+    meaning,
+    source,
   };
 }
 
@@ -282,38 +377,34 @@ function isCustomReadingMode() {
 }
 
 /**
- * Client-side automatic image resolver.
- * Tries to find a good semantic photo from Wikimedia Commons (then Unsplash source fallback).
- * Only online photos. Results cached. If none found for a word, map entry is null → show meaning in game.
+ * Live Wikimedia Commons search for a word (cached in localStorage).
+ * Returns URL string or null. Does not apply user overrides.
  */
 async function resolveOnlineImage(word, force = false) {
-  const cacheKey = 'chinese-game-image-cache-v2';
   let cache = {};
   try {
-    cache = JSON.parse(localStorage.getItem(cacheKey) || '{}');
+    cache = JSON.parse(localStorage.getItem(ONLINE_IMAGE_CACHE_KEY) || '{}');
   } catch {}
 
-  const key = `${word.hanzi}|${word.pinyin}`;
+  const key = `${word.hanzi}|${word.pinyin || ''}`;
   if (!force && cache[key] !== undefined) {
     return cache[key];
   }
 
-  // Try wikimedia first - prioritize semantic english meaning for better relevant pictures
   const queries = [];
   if (word.meaning) {
     const english = word.meaning.toLowerCase()
       .replace(/[^a-z\s]/g, ' ')
       .split(/\s+/)
-      .filter(w => w.length > 2 && !['the','and','for','with','from','to','a','an','of'].includes(w))
+      .filter((w) => w.length > 2 && !['the', 'and', 'for', 'with', 'from', 'to', 'a', 'an', 'of', 'sth', 'sb'].includes(w))
       .slice(0, 5)
       .join(' ');
     if (english) {
-      queries.push(english + ' photo illustration');
-      queries.push(`${word.hanzi} ${english}`);
+      queries.push(`${english} photo`);
+      queries.push(english);
     }
   }
-  queries.push(word.hanzi);
-  queries.push(word.hanzi + ' chinese object photo');
+  if (word.hanzi) queries.push(word.hanzi);
 
   let foundUrl = null;
   for (const q of queries) {
@@ -333,7 +424,7 @@ async function resolveOnlineImage(word, force = false) {
 
     try {
       const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (educational Chinese learning game)' }
+        headers: { 'User-Agent': 'ChineseWordMatching/1.0 (educational language game)' },
       });
       if (!res.ok) continue;
       const data = await res.json();
@@ -346,28 +437,146 @@ async function resolveOnlineImage(word, force = false) {
         }
       }
     } catch (e) { /* ignore */ }
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 80));
   }
 
-  if (!foundUrl) {
-    // Online photo fallback via unsplash source (keywords from meaning/hanzi)
-    const keywords = (word.meaning || word.hanzi).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim().split(/\s+/).slice(0,4).join(',');
-    foundUrl = `https://source.unsplash.com/400x300/?${keywords || 'chinese,object,real,photo'}`;
-  }
-
-  cache[key] = foundUrl;
-  localStorage.setItem(cacheKey, JSON.stringify(cache));
-  return foundUrl;
-}
-
-function isPicturable(word) {
-  // Not used. Decision is purely based on currentImageMap (online only) + getWordImage.
-  // If no online photo, show English meaning instead.
-  return false;
+  cache[key] = foundUrl || null;
+  try {
+    localStorage.setItem(ONLINE_IMAGE_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+  return foundUrl || null;
 }
 
 function getImageSrc(image) {
   return image.url || '';
+}
+
+/** Open modal to change picture for a word. onDone() called after any change. */
+function openImageEditModal(word, onDone) {
+  const modal = document.getElementById('image-edit-modal');
+  if (!modal || !word) return;
+
+  const hanziEl = document.getElementById('image-edit-hanzi');
+  const metaEl = document.getElementById('image-edit-meta');
+  const previewEl = document.getElementById('image-edit-preview');
+  const urlInput = document.getElementById('image-edit-url');
+  const statusEl = document.getElementById('image-edit-status');
+
+  const imgInfo = getWordImage(word);
+  const overrides = loadImageOverrides();
+  const hasOverride = Object.prototype.hasOwnProperty.call(overrides, word.hanzi);
+
+  if (hanziEl) hanziEl.textContent = word.hanzi || '';
+  if (metaEl) {
+    const meaning = (word.meaning || '').replace(/;/g, '; ').trim();
+    metaEl.textContent = `${word.pinyin || '—'} · ${meaning || 'no meaning'}${hasOverride ? ' · custom image' : ''}`;
+  }
+  if (urlInput) urlInput.value = (imgInfo.url && imgInfo.source === 'user') ? imgInfo.url : '';
+  if (statusEl) statusEl.textContent = '';
+
+  function showPreview(url) {
+    if (!previewEl) return;
+    if (url) {
+      previewEl.innerHTML = `<img src="${url}" alt="preview" onerror="this.parentElement.innerHTML='<span class=\\'image-edit-broken\\'>Could not load image</span>'">`;
+    } else {
+      previewEl.innerHTML = '<span class="image-edit-broken">No picture — English meaning will show in game</span>';
+    }
+  }
+  showPreview(imgInfo.url);
+
+  modal.hidden = false;
+  modal.dataset.hanzi = word.hanzi || '';
+  modal._editWord = word;
+  modal._onDone = onDone;
+
+  // One-time style: wire buttons once via data flag
+  if (!modal.dataset.bound) {
+    modal.dataset.bound = '1';
+
+    const close = () => {
+      modal.hidden = true;
+      modal._editWord = null;
+      modal._onDone = null;
+    };
+
+    document.getElementById('image-edit-close')?.addEventListener('click', close);
+    document.getElementById('image-edit-cancel')?.addEventListener('click', close);
+    modal.querySelector('.image-edit-backdrop')?.addEventListener('click', close);
+
+    document.getElementById('image-edit-save')?.addEventListener('click', () => {
+      const w = modal._editWord;
+      const url = (document.getElementById('image-edit-url')?.value || '').trim();
+      const st = document.getElementById('image-edit-status');
+      if (!w) return;
+      if (!url) {
+        if (st) st.textContent = 'Paste an https:// image URL, or use “No image”.';
+        return;
+      }
+      try {
+        setImageOverride(w.hanzi, url);
+        if (st) st.textContent = 'Saved custom image for this browser.';
+        showPreview(url);
+        if (typeof modal._onDone === 'function') modal._onDone();
+        setTimeout(close, 400);
+      } catch (err) {
+        if (st) st.textContent = err.message || 'Invalid URL.';
+      }
+    });
+
+    document.getElementById('image-edit-none')?.addEventListener('click', () => {
+      const w = modal._editWord;
+      if (!w) return;
+      setImageOverride(w.hanzi, null);
+      const st = document.getElementById('image-edit-status');
+      if (st) st.textContent = 'This word will use text (no picture).';
+      showPreview(null);
+      if (typeof modal._onDone === 'function') modal._onDone();
+      setTimeout(close, 400);
+    });
+
+    document.getElementById('image-edit-reset')?.addEventListener('click', () => {
+      const w = modal._editWord;
+      if (!w) return;
+      setImageOverride(w.hanzi, undefined);
+      // Drop session online cache for this word so default can re-resolve
+      if (w.hanzi) delete currentImageMap[w.hanzi];
+      const st = document.getElementById('image-edit-status');
+      if (st) st.textContent = 'Restored default (built-in or online).';
+      const next = getWordImage(w);
+      showPreview(next.url);
+      const urlIn = document.getElementById('image-edit-url');
+      if (urlIn) urlIn.value = '';
+      if (typeof modal._onDone === 'function') modal._onDone();
+    });
+
+    document.getElementById('image-edit-search')?.addEventListener('click', async () => {
+      const w = modal._editWord;
+      const st = document.getElementById('image-edit-status');
+      const btn = document.getElementById('image-edit-search');
+      if (!w) return;
+      if (st) st.textContent = 'Searching Wikimedia…';
+      if (btn) btn.disabled = true;
+      try {
+        const url = await resolveOnlineImage(w, true);
+        if (url) {
+          currentImageMap[w.hanzi] = url;
+          // Save as user override so it sticks
+          setImageOverride(w.hanzi, url);
+          const urlIn = document.getElementById('image-edit-url');
+          if (urlIn) urlIn.value = url;
+          showPreview(url);
+          if (st) st.textContent = 'Found and saved as your custom image.';
+          if (typeof modal._onDone === 'function') modal._onDone();
+        } else {
+          if (st) st.textContent = 'No Wikimedia image found. Try pasting a URL.';
+        }
+      } catch {
+        if (st) st.textContent = 'Search failed. Try again or paste a URL.';
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+  }
 }
 
 function shuffle(arr) {
@@ -571,8 +780,9 @@ function getSelectedHSKLevels() {
 }
 
 function isTextOnlyMode() {
-  // Always text-only — online picture search was removed.
-  return true;
+  // Text-only only when neither built-in nor overrides provide any images at all.
+  // Per-word fallback still uses meaning when a single word has no picture.
+  return false;
 }
 
 /** Filter a word list by checkboxes in the word list (if visible) or unselectedHanzi. */
@@ -980,26 +1190,32 @@ function startGame() {
   if (tickTimer) clearInterval(tickTimer);
   tickTimer = setInterval(gameTick, TICK_MS);
   updateBoard(true);
+
+  // Fill missing pictures via Wikimedia (skip words with user override or built-in image)
+  improveImagesWithOnline(currentSetWords);
 }
 
 async function improveImagesWithOnline(words) {
-  const grid = document.getElementById('picture-grid');
-  if (!grid) return;
+  if (!words || !words.length) return;
+  const overrides = loadImageOverrides();
+  const missing = words.filter((w) => {
+    if (!w || !w.hanzi) return false;
+    if (Object.prototype.hasOwnProperty.call(overrides, w.hanzi)) return false;
+    if (getBuiltInImageUrl(w)) return false;
+    return true;
+  });
+  if (!missing.length) return;
 
-  for (const word of words) {
-    const onlineUrl = await resolveOnlineImage(word);
-    if (!onlineUrl || !gameActive) continue;
-
-    // Upgrade image with the online searched one (overrides local if search succeeded)
-    const cards = grid.querySelectorAll(`.picture-card[data-hanzi="${word.hanzi}"]`);
-    cards.forEach(card => {
-      const img = card.querySelector('.picture-img');
-      if (!img) return;
-      img.src = onlineUrl;
-      img.style.opacity = '0.65';
-      setTimeout(() => { if (img && img.parentElement) img.style.opacity = '1'; }, 280);
-    });
+  // Limit live searches for large sets
+  const batch = missing.slice(0, 40);
+  let foundAny = false;
+  for (const word of batch) {
+    if (!gameActive) break;
+    const onlineUrl = await resolveOnlineImage(word, false);
+    currentImageMap[word.hanzi] = onlineUrl || null;
+    if (onlineUrl) foundAny = true;
   }
+  if (foundAny && gameActive) updateBoard(true);
 }
 
 /** Render a nice preview of pictures + words (used after online search)
@@ -1262,6 +1478,35 @@ function initPictureGame(vocabulary) {
   document.getElementById('play-again-btn').addEventListener('click', restartGame);
   document.getElementById('back-menu-btn').addEventListener('click', backToMenu);
 
+  function wordListImageControls(w) {
+    const img = getWordImage(w);
+    const hanziAttr = String(w.hanzi || '').replace(/"/g, '&quot;');
+    const thumb = img.url
+      ? `<img class="word-list-thumb" src="${img.url}" alt="" loading="lazy" onerror="this.style.display='none'">`
+      : `<span class="word-list-thumb word-list-thumb--empty" title="No picture">文</span>`;
+    const badge = img.source === 'user'
+      ? (img.url ? 'custom' : 'hidden')
+      : (img.url ? '' : 'none');
+    const badgeHtml = badge
+      ? `<span class="img-badge img-badge--${badge}">${badge === 'hidden' ? 'no img' : badge}</span>`
+      : '';
+    return `${thumb}${badgeHtml}<button type="button" class="img-edit-btn" data-hanzi="${hanziAttr}" title="Change picture">Image</button>`;
+  }
+
+  function bindWordListImageEditors(listEl, words, onRefresh) {
+    listEl.querySelectorAll('.img-edit-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const hanzi = btn.dataset.hanzi;
+        const word = (words || []).find((w) => w.hanzi === hanzi)
+          || pictureVocabulary.find((w) => w.hanzi === hanzi)
+          || { hanzi, pinyin: '', meaning: '' };
+        openImageEditModal(word, onRefresh);
+      });
+    });
+  }
+
   // Helper to show a selectable words list (checkboxes) before playing
   function showBasicWordsList(words) {
     const listEl = document.getElementById('extracted-words-list');
@@ -1272,21 +1517,33 @@ function initPictureGame(vocabulary) {
       const meaning = (w.meaning || '').replace(/;/g, '; ').trim();
       const levelInfo = w.level ? ` (HSK${w.level})` : '';
       const isChecked = !unselectedHanzi.has(w.hanzi);
-      return `<li>
-        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+      return `<li class="word-list-item">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; flex:1; min-width:0;">
           <input type="checkbox" ${isChecked ? 'checked' : ''} data-hanzi="${w.hanzi}" style="margin:0;">
           <span class="hanzi">${w.hanzi}</span>
-          <span class="pinyin">(${w.pinyin})</span>
+          <span class="pinyin">(${w.pinyin || ''})</span>
           <span class="meaning">— ${meaning}${levelInfo}</span>
         </label>
+        <div class="word-list-img-actions">${wordListImageControls(w)}</div>
       </li>`;
     }).join('');
 
     const title = isCustom
       ? 'Extracted words (uncheck to exclude from games)'
       : 'Words in this set (uncheck to exclude from games)';
-    listEl.innerHTML = `<strong>${title} (${words.length}):</strong><ul>${itemsHtml}</ul>`;
+    listEl.innerHTML = `<strong>${title} (${words.length}):</strong>
+      <p class="word-list-img-hint">Use <em>Image</em> if a picture is wrong or missing.</p>
+      <ul>${itemsHtml}</ul>`;
     listEl.hidden = false;
+
+    const refresh = () => {
+      if (isCustom && customWords && customWords.length) renderExtractedList(customWords);
+      else {
+        const group = getCurrentGroupWordsUnfiltered();
+        if (group && group.length) showBasicWordsList(group);
+      }
+      if (gameActive) updateBoard(true);
+    };
 
     const cbs = listEl.querySelectorAll('input[type="checkbox"]');
     cbs.forEach(cb => {
@@ -1297,15 +1554,10 @@ function initPictureGame(vocabulary) {
         } else {
           unselectedHanzi.add(hanzi);
         }
-        // Re-render from the same full list to keep checkboxes stable
-        if (isCustom && customWords && customWords.length) {
-          renderExtractedList(customWords);
-        } else {
-          const group = getCurrentGroupWordsUnfiltered();
-          if (group && group.length) showBasicWordsList(group);
-        }
+        refresh();
       });
     });
+    bindWordListImageEditors(listEl, words, refresh);
   }
 
 
@@ -1577,6 +1829,7 @@ function initPictureGame(vocabulary) {
       pinyin: (document.getElementById('add-pinyin')?.value || '').trim(),
       meaning: (document.getElementById('add-meaning')?.value || '').trim(),
       level: Number(document.getElementById('add-level')?.value || 3),
+      imageUrl: (document.getElementById('add-image-url')?.value || '').trim(),
     };
   }
 
@@ -1608,15 +1861,26 @@ function initPictureGame(vocabulary) {
         setAddWordStatus(result.reason || 'Could not add word.', true);
         return;
       }
+      let imgNote = '';
+      if (data.imageUrl) {
+        try {
+          setImageOverride(result.word.hanzi, data.imageUrl);
+          imgNote = ' · image saved';
+        } catch (err) {
+          imgNote = ` · word saved, but image not saved (${err.message})`;
+        }
+      }
       setAddWordStatus(
-        `✅ Added <strong>${result.word.hanzi}</strong> (${result.word.pinyin}) — ${result.word.meaning}`
+        `✅ Added <strong>${result.word.hanzi}</strong> (${result.word.pinyin}) — ${result.word.meaning}${imgNote}`
       );
       const hanziEl = document.getElementById('add-hanzi');
       const pinyinEl = document.getElementById('add-pinyin');
       const meaningEl = document.getElementById('add-meaning');
+      const imgEl = document.getElementById('add-image-url');
       if (hanziEl) hanziEl.value = '';
       if (pinyinEl) pinyinEl.value = '';
       if (meaningEl) meaningEl.value = '';
+      if (imgEl) imgEl.value = '';
       if (hanziEl) hanziEl.focus();
       renderUserWordsList();
       updatePictureSetOptions();
@@ -1685,24 +1949,27 @@ function initPictureGame(vocabulary) {
       const meaning = (w.meaning || '').replace(/;/g, '; ').trim();
       const levelInfo = w.level ? ` (HSK${w.level})` : '';
       const isChecked = !unselectedHanzi.has(w.hanzi);
-      let imgHtml = '';
-      const imgInfo = getWordImage(w);
-      if (imgInfo.url && !imgInfo.showMeaning) {
-        imgHtml = `<img src="${imgInfo.url}" style="width:48px;height:36px;object-fit:cover;vertical-align:middle;margin-right:6px;border-radius:3px;">`;
-      }
-      return `<li>
-        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+      return `<li class="word-list-item">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; flex:1; min-width:0;">
           <input type="checkbox" ${isChecked ? 'checked' : ''} data-hanzi="${w.hanzi}" style="margin:0;">
-          ${imgHtml}<span class="hanzi">${w.hanzi}</span> 
-          <span class="pinyin">(${w.pinyin})</span> 
+          <span class="hanzi">${w.hanzi}</span>
+          <span class="pinyin">(${w.pinyin || ''})</span>
           <span class="meaning">— ${meaning}${levelInfo}</span>
         </label>
+        <div class="word-list-img-actions">${wordListImageControls(w)}</div>
       </li>`;
     }).join('');
-    listEl.innerHTML = `<strong>Extracted words (${words.length}) — uncheck to exclude from games:</strong><ul>${items}</ul>`;
+    listEl.innerHTML = `<strong>Extracted words (${words.length}) — uncheck to exclude from games:</strong>
+      <p class="word-list-img-hint">Use <em>Image</em> if a picture is wrong or missing.</p>
+      <ul>${items}</ul>`;
     listEl.hidden = false;
 
-    // Attach listeners to update active selection (affects games)
+    const refresh = () => {
+      updatePictureSetOptions();
+      if (customWords && customWords.length) renderExtractedList(customWords);
+      if (gameActive) updateBoard(true);
+    };
+
     const checkboxes = listEl.querySelectorAll('input[type="checkbox"]');
     checkboxes.forEach(cb => {
       cb.addEventListener('change', () => {
@@ -1712,12 +1979,10 @@ function initPictureGame(vocabulary) {
         } else {
           unselectedHanzi.add(hanzi);
         }
-        updatePictureSetOptions();
-        if (customWords && customWords.length) {
-          renderExtractedList(customWords);
-        }
+        refresh();
       });
     });
+    bindWordListImageEditors(listEl, words, refresh);
   }
 
   // (old updateActive removed; checkbox listeners now directly update using getActiveExtractedWords and re-render full list)
