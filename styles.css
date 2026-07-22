@@ -233,7 +233,8 @@ body {
   background: #eee;
   color: var(--muted);
 }
-.img-badge--custom {
+.img-badge--custom,
+.img-badge--shared {
   background: var(--green-soft);
   color: var(--green);
 }
@@ -299,7 +300,16 @@ body {
 .image-edit-meta {
   font-size: 0.85rem;
   color: var(--muted);
-  margin: 0.35rem 0 0.75rem;
+  margin: 0.35rem 0 0.35rem;
+}
+.image-edit-shared-hint {
+  font-size: 0.8rem;
+  color: var(--green);
+  margin: 0 0 0.75rem;
+  line-height: 1.35;
+}
+.image-edit-shared-hint--warn {
+  color: var(--accent);
 }
 .image-edit-preview {
   min-height: 120px;

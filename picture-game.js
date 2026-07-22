@@ -258,49 +258,38 @@ function wordKey(word) {
   return `${word.hanzi}|${word.pinyin}`;
 }
 
-const USER_IMAGE_OVERRIDES_KEY = 'chinese-user-image-overrides-v1';
 const ONLINE_IMAGE_CACHE_KEY = 'chinese-game-image-cache-v3';
 
-/** User image overrides: { [hanzi]: string URL | null }. null = force no picture. */
-function loadImageOverrides() {
-  try {
-    const raw = localStorage.getItem(USER_IMAGE_OVERRIDES_KEY);
-    if (!raw) return {};
-    const obj = JSON.parse(raw);
-    return obj && typeof obj === 'object' ? obj : {};
-  } catch {
-    return {};
-  }
+function sharedLibrary() {
+  return typeof SharedImageLibrary !== 'undefined' ? SharedImageLibrary : null;
 }
 
-function saveImageOverrides(map) {
-  try {
-    localStorage.setItem(USER_IMAGE_OVERRIDES_KEY, JSON.stringify(map || {}));
-  } catch (e) {
-    console.warn('Could not save image overrides', e);
-  }
+function sharedLibraryEnabled() {
+  const lib = sharedLibrary();
+  return !!(lib && lib.enabled);
 }
 
 /**
- * Set override for a hanzi.
- * url: https URL string, null for "no image", undefined to clear override (restore default).
+ * Set shared (community) image for a hanzi.
+ * url: https URL string, null for "no image", undefined to delete shared entry (use built-in default).
+ * Writes to Supabase when configured — survives deploys; visible to all users.
  */
-function setImageOverride(hanzi, url) {
+async function setImageOverride(hanzi, url, meta = {}) {
   const key = (hanzi || '').trim();
-  if (!key) return;
-  const map = loadImageOverrides();
-  if (url === undefined) {
-    delete map[key];
-  } else if (url === null) {
-    map[key] = null;
-  } else {
-    const s = String(url).trim();
-    if (!/^https:\/\//i.test(s)) {
-      throw new Error('Image URL must start with https://');
-    }
-    map[key] = s;
+  if (!key) throw new Error('Missing Chinese word.');
+  const lib = sharedLibrary();
+
+  if (!lib || !lib.enabled) {
+    throw new Error(
+      'Shared image library is not configured. Add Supabase URL + anon key in config.js (see config.example.js and supabase/schema.sql).'
+    );
   }
-  saveImageOverrides(map);
+
+  if (url === undefined) {
+    await lib.remove(key);
+    return;
+  }
+  await lib.set(key, url, meta);
 }
 
 let _wordImageByHanzi = null;
@@ -331,22 +320,23 @@ function getBuiltInImageUrl(word) {
 
 /**
  * Picture lookup priority:
- * 1) user override (localStorage) — URL or forced null
- * 2) built-in WORD_IMAGES (images.js)
+ * 1) shared library (Supabase, multi-user, survives deploys)
+ * 2) built-in WORD_IMAGES (images.js shipped with the site)
  * 3) session / live resolve map (currentImageMap)
  * 4) text fallback (English meaning)
  */
 function getWordImage(word) {
   const meaning = (word.meaning || '').replace(/;/g, '; ').trim();
   const hanzi = word.hanzi || '';
-  const overrides = loadImageOverrides();
+  const lib = sharedLibrary();
 
   let url = null;
   let source = 'none';
 
-  if (Object.prototype.hasOwnProperty.call(overrides, hanzi)) {
-    url = overrides[hanzi]; // may be null = force text
-    source = 'user';
+  if (lib && lib.has(hanzi)) {
+    const entry = lib.get(hanzi);
+    url = entry ? entry.url : null; // may be null = force text
+    source = 'shared';
   } else {
     url = getBuiltInImageUrl(word);
     if (url) source = 'builtin';
@@ -451,7 +441,7 @@ function getImageSrc(image) {
   return image.url || '';
 }
 
-/** Open modal to change picture for a word. onDone() called after any change. */
+/** Open modal to change picture for a word (writes to shared library). onDone() after change. */
 function openImageEditModal(word, onDone) {
   const modal = document.getElementById('image-edit-modal');
   if (!modal || !word) return;
@@ -461,18 +451,34 @@ function openImageEditModal(word, onDone) {
   const previewEl = document.getElementById('image-edit-preview');
   const urlInput = document.getElementById('image-edit-url');
   const statusEl = document.getElementById('image-edit-status');
+  const sharedHint = document.getElementById('image-edit-shared-hint');
 
   const imgInfo = getWordImage(word);
-  const overrides = loadImageOverrides();
-  const hasOverride = Object.prototype.hasOwnProperty.call(overrides, word.hanzi);
+  const lib = sharedLibrary();
+  const inShared = !!(lib && lib.has(word.hanzi));
 
   if (hanziEl) hanziEl.textContent = word.hanzi || '';
   if (metaEl) {
     const meaning = (word.meaning || '').replace(/;/g, '; ').trim();
-    metaEl.textContent = `${word.pinyin || '—'} · ${meaning || 'no meaning'}${hasOverride ? ' · custom image' : ''}`;
+    const srcNote = inShared
+      ? ' · shared library'
+      : imgInfo.source === 'builtin'
+        ? ' · built-in map'
+        : imgInfo.url
+          ? ' · online'
+          : '';
+    metaEl.textContent = `${word.pinyin || '—'} · ${meaning || 'no meaning'}${srcNote}`;
   }
-  if (urlInput) urlInput.value = (imgInfo.url && imgInfo.source === 'user') ? imgInfo.url : '';
+  if (urlInput) {
+    urlInput.value = (imgInfo.url && imgInfo.source === 'shared') ? imgInfo.url : (imgInfo.url || '');
+  }
   if (statusEl) statusEl.textContent = '';
+  if (sharedHint) {
+    sharedHint.textContent = sharedLibraryEnabled()
+      ? 'Edits are saved to the shared library for everyone and keep working after site updates.'
+      : 'Shared library is not configured — set config.js (Supabase) so all users can share image edits.';
+    sharedHint.classList.toggle('image-edit-shared-hint--warn', !sharedLibraryEnabled());
+  }
 
   function showPreview(url) {
     if (!previewEl) return;
@@ -489,7 +495,6 @@ function openImageEditModal(word, onDone) {
   modal._editWord = word;
   modal._onDone = onDone;
 
-  // One-time style: wire buttons once via data flag
   if (!modal.dataset.bound) {
     modal.dataset.bound = '1';
 
@@ -499,82 +504,85 @@ function openImageEditModal(word, onDone) {
       modal._onDone = null;
     };
 
+    async function runAction(fn) {
+      const st = document.getElementById('image-edit-status');
+      const buttons = modal.querySelectorAll('.image-edit-actions button');
+      buttons.forEach((b) => { b.disabled = true; });
+      try {
+        await fn(st);
+      } catch (err) {
+        if (st) st.textContent = err.message || String(err);
+      } finally {
+        buttons.forEach((b) => { b.disabled = false; });
+      }
+    }
+
     document.getElementById('image-edit-close')?.addEventListener('click', close);
     document.getElementById('image-edit-cancel')?.addEventListener('click', close);
     modal.querySelector('.image-edit-backdrop')?.addEventListener('click', close);
 
     document.getElementById('image-edit-save')?.addEventListener('click', () => {
-      const w = modal._editWord;
-      const url = (document.getElementById('image-edit-url')?.value || '').trim();
-      const st = document.getElementById('image-edit-status');
-      if (!w) return;
-      if (!url) {
-        if (st) st.textContent = 'Paste an https:// image URL, or use “No image”.';
-        return;
-      }
-      try {
-        setImageOverride(w.hanzi, url);
-        if (st) st.textContent = 'Saved custom image for this browser.';
+      runAction(async (st) => {
+        const w = modal._editWord;
+        const url = (document.getElementById('image-edit-url')?.value || '').trim();
+        if (!w) return;
+        if (!url) {
+          if (st) st.textContent = 'Paste an https:// image URL, or use “No image”.';
+          return;
+        }
+        await setImageOverride(w.hanzi, url, { pinyin: w.pinyin, meaning: w.meaning });
+        if (st) st.textContent = 'Saved to shared library for all users.';
         showPreview(url);
         if (typeof modal._onDone === 'function') modal._onDone();
-        setTimeout(close, 400);
-      } catch (err) {
-        if (st) st.textContent = err.message || 'Invalid URL.';
-      }
+        setTimeout(close, 500);
+      });
     });
 
     document.getElementById('image-edit-none')?.addEventListener('click', () => {
-      const w = modal._editWord;
-      if (!w) return;
-      setImageOverride(w.hanzi, null);
-      const st = document.getElementById('image-edit-status');
-      if (st) st.textContent = 'This word will use text (no picture).';
-      showPreview(null);
-      if (typeof modal._onDone === 'function') modal._onDone();
-      setTimeout(close, 400);
+      runAction(async (st) => {
+        const w = modal._editWord;
+        if (!w) return;
+        await setImageOverride(w.hanzi, null, { pinyin: w.pinyin, meaning: w.meaning });
+        if (st) st.textContent = 'Shared: this word uses text only (no picture) for everyone.';
+        showPreview(null);
+        if (typeof modal._onDone === 'function') modal._onDone();
+        setTimeout(close, 500);
+      });
     });
 
     document.getElementById('image-edit-reset')?.addEventListener('click', () => {
-      const w = modal._editWord;
-      if (!w) return;
-      setImageOverride(w.hanzi, undefined);
-      // Drop session online cache for this word so default can re-resolve
-      if (w.hanzi) delete currentImageMap[w.hanzi];
-      const st = document.getElementById('image-edit-status');
-      if (st) st.textContent = 'Restored default (built-in or online).';
-      const next = getWordImage(w);
-      showPreview(next.url);
-      const urlIn = document.getElementById('image-edit-url');
-      if (urlIn) urlIn.value = '';
-      if (typeof modal._onDone === 'function') modal._onDone();
+      runAction(async (st) => {
+        const w = modal._editWord;
+        if (!w) return;
+        await setImageOverride(w.hanzi, undefined);
+        if (w.hanzi) delete currentImageMap[w.hanzi];
+        if (st) st.textContent = 'Removed from shared library — using built-in / online default.';
+        const next = getWordImage(w);
+        showPreview(next.url);
+        const urlIn = document.getElementById('image-edit-url');
+        if (urlIn) urlIn.value = next.url || '';
+        if (typeof modal._onDone === 'function') modal._onDone();
+      });
     });
 
-    document.getElementById('image-edit-search')?.addEventListener('click', async () => {
-      const w = modal._editWord;
-      const st = document.getElementById('image-edit-status');
-      const btn = document.getElementById('image-edit-search');
-      if (!w) return;
-      if (st) st.textContent = 'Searching Wikimedia…';
-      if (btn) btn.disabled = true;
-      try {
+    document.getElementById('image-edit-search')?.addEventListener('click', () => {
+      runAction(async (st) => {
+        const w = modal._editWord;
+        if (!w) return;
+        if (st) st.textContent = 'Searching Wikimedia…';
         const url = await resolveOnlineImage(w, true);
-        if (url) {
-          currentImageMap[w.hanzi] = url;
-          // Save as user override so it sticks
-          setImageOverride(w.hanzi, url);
-          const urlIn = document.getElementById('image-edit-url');
-          if (urlIn) urlIn.value = url;
-          showPreview(url);
-          if (st) st.textContent = 'Found and saved as your custom image.';
-          if (typeof modal._onDone === 'function') modal._onDone();
-        } else {
+        if (!url) {
           if (st) st.textContent = 'No Wikimedia image found. Try pasting a URL.';
+          return;
         }
-      } catch {
-        if (st) st.textContent = 'Search failed. Try again or paste a URL.';
-      } finally {
-        if (btn) btn.disabled = false;
-      }
+        currentImageMap[w.hanzi] = url;
+        await setImageOverride(w.hanzi, url, { pinyin: w.pinyin, meaning: w.meaning });
+        const urlIn = document.getElementById('image-edit-url');
+        if (urlIn) urlIn.value = url;
+        showPreview(url);
+        if (st) st.textContent = 'Found and saved to shared library.';
+        if (typeof modal._onDone === 'function') modal._onDone();
+      });
     });
   }
 }
@@ -1197,10 +1205,11 @@ function startGame() {
 
 async function improveImagesWithOnline(words) {
   if (!words || !words.length) return;
-  const overrides = loadImageOverrides();
+  const lib = sharedLibrary();
   const missing = words.filter((w) => {
     if (!w || !w.hanzi) return false;
-    if (Object.prototype.hasOwnProperty.call(overrides, w.hanzi)) return false;
+    // Shared entry (including forced null) wins — do not re-search
+    if (lib && lib.has(w.hanzi)) return false;
     if (getBuiltInImageUrl(w)) return false;
     return true;
   });
@@ -1446,6 +1455,23 @@ function initPictureGame(vocabulary) {
   populateLessons();
   updatePictureSetOptions();
 
+  // Load shared image library (Supabase) — does not block first paint; refreshes lists when done
+  const lib = sharedLibrary();
+  if (lib && lib.enabled) {
+    lib.loadAll().then(() => {
+      updatePictureSetOptions();
+      const listEl = document.getElementById('extracted-words-list');
+      if (listEl && !listEl.hidden && customWords && customWords.length) {
+        // re-render if custom list already open
+        const btn = document.getElementById('extract-custom-btn');
+        if (btn && typeof listEl._refreshShared === 'function') listEl._refreshShared();
+      }
+      if (gameActive) updateBoard(true);
+      const status = document.getElementById('shared-library-status');
+      if (status) status.textContent = lib.statusLabel();
+    });
+  }
+
   // Don't auto-show word lists on load. Custom shows after extract; sets mode after Preview.
 
   // Level change listener (for checkboxes or old select)
@@ -1484,13 +1510,13 @@ function initPictureGame(vocabulary) {
     const thumb = img.url
       ? `<img class="word-list-thumb" src="${img.url}" alt="" loading="lazy" onerror="this.style.display='none'">`
       : `<span class="word-list-thumb word-list-thumb--empty" title="No picture">文</span>`;
-    const badge = img.source === 'user'
-      ? (img.url ? 'custom' : 'hidden')
+    const badge = img.source === 'shared'
+      ? (img.url ? 'shared' : 'hidden')
       : (img.url ? '' : 'none');
     const badgeHtml = badge
       ? `<span class="img-badge img-badge--${badge}">${badge === 'hidden' ? 'no img' : badge}</span>`
       : '';
-    return `${thumb}${badgeHtml}<button type="button" class="img-edit-btn" data-hanzi="${hanziAttr}" title="Change picture">Image</button>`;
+    return `${thumb}${badgeHtml}<button type="button" class="img-edit-btn" data-hanzi="${hanziAttr}" title="Edit shared picture">Image</button>`;
   }
 
   function bindWordListImageEditors(listEl, words, onRefresh) {
@@ -1853,7 +1879,7 @@ function initPictureGame(vocabulary) {
   }
 
   if (addWordForm) {
-    addWordForm.addEventListener('submit', (e) => {
+    addWordForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const data = readAddWordForm();
       const result = addUserWord(data);
@@ -1864,8 +1890,11 @@ function initPictureGame(vocabulary) {
       let imgNote = '';
       if (data.imageUrl) {
         try {
-          setImageOverride(result.word.hanzi, data.imageUrl);
-          imgNote = ' · image saved';
+          await setImageOverride(result.word.hanzi, data.imageUrl, {
+            pinyin: result.word.pinyin,
+            meaning: result.word.meaning,
+          });
+          imgNote = ' · image saved to shared library';
         } catch (err) {
           imgNote = ` · word saved, but image not saved (${err.message})`;
         }

@@ -263,6 +263,7 @@
         <button type="button" class="image-edit-x" id="image-edit-close" aria-label="Close">×</button>
       </div>
       <p id="image-edit-meta" class="image-edit-meta"></p>
+      <p id="image-edit-shared-hint" class="image-edit-shared-hint"></p>
       <div id="image-edit-preview" class="image-edit-preview"></div>
       <label class="add-field" style="margin:0.75rem 0;">
         <span>Image URL (https only)</span>
@@ -270,7 +271,7 @@
       </label>
       <p id="image-edit-status" class="image-edit-status"></p>
       <div class="image-edit-actions">
-        <button type="button" class="btn btn-primary" id="image-edit-save">Save URL</button>
+        <button type="button" class="btn btn-primary" id="image-edit-save">Save to shared library</button>
         <button type="button" class="btn btn-secondary" id="image-edit-search">Search Wikimedia</button>
         <button type="button" class="btn btn-secondary" id="image-edit-none">No image</button>
         <button type="button" class="btn btn-secondary" id="image-edit-reset">Use default</button>
@@ -279,6 +280,8 @@
     </div>
   </div>
 
+  <script src="config.js"></script>
+  <script src="image-library.js"></script>
   <script src="vocabulary.js" charset="utf-8"></script>
   <script src="images.js" charset="utf-8"></script>
   <script src="picture-game.js"></script>

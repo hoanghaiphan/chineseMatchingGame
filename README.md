@@ -12,12 +12,37 @@ A bilingual Chinese (HSK) vocabulary matching game.
 
 - HSK 1–6 vocabulary
 - **Pictures** for matching when available:
-  1. Your custom image overrides (this browser)
-  2. Built-in map in `images.js` (Wikimedia URLs)
-  3. Live Wikimedia search when still missing (cached in the browser)
+  1. **Shared library** (Supabase) — multi-user edits, survives deploys
+  2. Built-in map in `images.js` (Wikimedia URLs shipped with the site)
+  3. Live Wikimedia search when still missing (session / browser cache)
   4. Text fallback (hanzi + English) when no picture
-- **Edit pictures** — On any word list, click **Image** to paste a URL, search Wikimedia, force “no image”, or restore default
+- **Edit pictures (shared)** — On any word list, click **Image** to save a URL for everyone, search Wikimedia, force “no image”, or clear the shared entry
 - High score, TTS pronunciation, keyboard (1–6, S)
+
+## Shared image library (multi-user database)
+
+Image links edited by players are stored in **Supabase Postgres**, not in the Netlify deploy. Updating the site or Netlify Functions does **not** wipe the library.
+
+### One-time setup
+
+1. Create a free project at [supabase.com](https://supabase.com)
+2. SQL Editor → run `supabase/schema.sql`
+3. Copy `config.example.js` → `config.js` and set:
+   - `supabaseUrl` (Project Settings → API)
+   - `supabaseAnonKey` (anon public key)
+4. Redeploy / refresh the site
+
+Until `config.js` is filled in, the game still works with `images.js` + Wikimedia; **Save** will explain that the shared library is not configured.
+
+### How multi-user edits work
+
+| Action | Effect |
+|--------|--------|
+| Save URL / Search / No image | Upsert row in `chinese_word_images` |
+| Use default | Deletes shared row → built-in map / live search again |
+| Many users | Last write wins per 汉字; everyone reads the same table |
+
+LocalStorage only caches the shared map for faster loads — **source of truth is Supabase**.
 
 ## How to run
 
@@ -42,31 +67,26 @@ node build-images.js
 
 This regenerates `images.js` with Wikimedia thumbnail links. Redeploy the site to share the updated map with everyone.
 
-## User picture edits
-
-- Stored only in **localStorage** (this browser / device)
-- Not shared with other players or devices
-- Use **Image** on a word in the list after extract or Preview
-- When adding a custom word, optional **Image URL** field saves an override for that hanzi
-
 ## Project files
 
 | File | Role |
 |------|------|
 | `index.html` | UI + image edit modal |
+| `config.js` / `config.example.js` | Supabase shared-library credentials |
+| `image-library.js` | Shared library client (read/write Supabase) |
+| `supabase/schema.sql` | Database table + RLS policies |
 | `main.js` | Boot |
-| `picture-game.js` | Game, extract, user words, image overrides |
+| `picture-game.js` | Game, extract, user words, image UI |
 | `vocabulary.js` | HSK data |
-| `images.js` | Built-in word → image URL map |
+| `images.js` | Built-in word → image URL map (defaults) |
 | `build-images.js` | Rebuild `images.js` |
 | `styles.css` | Styling |
 | `server.js` | Local static server |
 
 ## Hosting (Netlify / GitHub Pages / etc.)
 
-Static site only — upload `index.html`, `*.js`, `*.css`. **No** `images/` folder or `local-image-map.js` required.
-
-Friends get the shared `images.js` map. Their personal picture fixes stay in their own browser.
+Upload static files including `config.js` (with your anon key).  
+The **image database stays in Supabase** across every deploy.
 
 ## Controls
 
