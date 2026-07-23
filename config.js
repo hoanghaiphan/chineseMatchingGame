@@ -19,3 +19,14 @@ window.IMAGE_LIBRARY_CONFIG = {
   // Table name from schema.sql
   table: 'chinese_word_images',
 };
+
+/**
+ * Optional keys for legal bulk photo sources (used in the picture picker).
+ * Leave blank to use only free no-key sources: Wikimedia Commons + Openverse.
+ * Get free keys: unsplash.com/developers · pexels.com/api · pixabay.com/api/docs
+ */
+window.IMAGE_SEARCH_CONFIG = {
+  unsplashAccessKey: '',
+  pexelsApiKey: '',
+  pixabayApiKey: '',
+};

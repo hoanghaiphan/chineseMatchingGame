@@ -14,9 +14,12 @@ A bilingual Chinese (HSK) vocabulary matching game.
 - **Pictures** for matching when available:
   1. **Shared library** (Supabase) — multi-user edits, survives deploys
   2. Built-in map in `images.js` (Wikimedia URLs shipped with the site)
-  3. Live Wikimedia search when still missing (session / browser cache)
+  3. Live multi-source photo search when still missing (session / browser cache)
   4. Text fallback (hanzi + English) when no picture
-- **Edit pictures (shared)** — On any word list, click **Image** to save a URL for everyone, search Wikimedia, force “no image”, or clear the shared entry
+- **Edit pictures (shared)** — On any word list, click **Image** to:
+  - Search **Wikimedia**, **Openverse** (no keys), plus optional **Unsplash / Pexels / Pixabay**
+  - Compare thumbnails, pick the best, then **Save** to the shared library
+  - Force “no image”, or clear the shared entry
 - High score, TTS pronunciation, keyboard (1–6, S)
 
 ## Shared image library (multi-user database)
@@ -30,9 +33,29 @@ Image links edited by players are stored in **Supabase Postgres**, not in the Ne
 3. Copy `config.example.js` → `config.js` and set:
    - `supabaseUrl` (Project Settings → API)
    - `supabaseAnonKey` (anon public key)
+   - (Optional) photo API keys under `IMAGE_SEARCH_CONFIG` — see below
 4. Redeploy / refresh the site
 
-Until `config.js` is filled in, the game still works with `images.js` + Wikimedia; **Save** will explain that the shared library is not configured.
+Until `config.js` is filled in, the game still works with `images.js` + Wikimedia/Openverse; **Save** will explain that the shared library is not configured.
+
+### Optional photo sources (Unsplash / Pexels / Pixabay)
+
+The image editor can search several **legal bulk** sources. Free with no key:
+
+| Source | Key needed? | Notes |
+|--------|-------------|--------|
+| **Wikimedia Commons** | No | Default for built-in map + live fill |
+| **Openverse** | No | Creative Commons / public-domain aggregator |
+
+Optional free APIs (paste keys into `config.js` → `IMAGE_SEARCH_CONFIG`):
+
+| Source | Get a free key |
+|--------|----------------|
+| **Unsplash** | [unsplash.com/developers](https://unsplash.com/developers) → Access Key |
+| **Pexels** | [pexels.com/api](https://www.pexels.com/api/) |
+| **Pixabay** | [pixabay.com/api/docs](https://pixabay.com/api/docs/) |
+
+Keys in the browser are visible to users (normal for client-side demos). Prefer free-tier keys and domain restrictions if the provider supports them.
 
 ### How multi-user edits work
 
@@ -72,7 +95,7 @@ This regenerates `images.js` with Wikimedia thumbnail links. Redeploy the site t
 | File | Role |
 |------|------|
 | `index.html` | UI + image edit modal |
-| `config.js` / `config.example.js` | Supabase shared-library credentials |
+| `config.js` / `config.example.js` | Supabase + optional Unsplash/Pexels/Pixabay keys |
 | `image-library.js` | Shared library client (read/write Supabase) |
 | `supabase/schema.sql` | Database table + RLS policies |
 | `main.js` | Boot |

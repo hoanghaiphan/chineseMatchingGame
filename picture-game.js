@@ -258,10 +258,316 @@ function wordKey(word) {
   return `${word.hanzi}|${word.pinyin}`;
 }
 
-const ONLINE_IMAGE_CACHE_KEY = 'chinese-game-image-cache-v3';
+const ONLINE_IMAGE_CACHE_KEY = 'chinese-game-image-cache-v4';
 
 function sharedLibrary() {
   return typeof SharedImageLibrary !== 'undefined' ? SharedImageLibrary : null;
+}
+
+function getImageSearchConfig() {
+  const cfg = (typeof window !== 'undefined' && window.IMAGE_SEARCH_CONFIG) || {};
+  return {
+    unsplashAccessKey: (cfg.unsplashAccessKey || '').trim(),
+    pexelsApiKey: (cfg.pexelsApiKey || '').trim(),
+    pixabayApiKey: (cfg.pixabayApiKey || '').trim(),
+  };
+}
+
+/** English search terms from a vocab entry (for photo APIs). */
+function buildImageSearchQueries(word) {
+  const queries = [];
+  if (word && word.meaning) {
+    const english = String(word.meaning).toLowerCase()
+      .replace(/[^a-z\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !['the', 'and', 'for', 'with', 'from', 'to', 'a', 'an', 'of', 'sth', 'sb', 'coll', 'bound', 'form'].includes(w))
+      .slice(0, 6)
+      .join(' ');
+    if (english) {
+      queries.push(english);
+      const firstSense = english.split(/\s+/).slice(0, 3).join(' ');
+      if (firstSense && firstSense !== english) queries.push(firstSense);
+    }
+  }
+  if (word && word.hanzi) queries.push(word.hanzi);
+  return [...new Set(queries.filter(Boolean))];
+}
+
+function defaultSearchQuery(word) {
+  const qs = buildImageSearchQueries(word);
+  return qs[0] || (word && word.hanzi) || '';
+}
+
+/**
+ * @typedef {{ url: string, thumb: string, source: string, credit?: string, pageUrl?: string }} ImageCandidate
+ */
+
+async function searchWikimediaImages(query, limit = 6) {
+  if (!query) return [];
+  const params = new URLSearchParams({
+    action: 'query',
+    generator: 'search',
+    gsrsearch: query,
+    gsrnamespace: '6',
+    gsrlimit: String(Math.min(limit, 12)),
+    prop: 'pageimages|info',
+    piprop: 'thumbnail',
+    pithumbsize: '450',
+    inprop: 'url',
+    format: 'json',
+    origin: '*',
+  });
+  try {
+    const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
+      headers: { 'User-Agent': 'ChineseWordMatching/1.0 (educational language game)' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const pages = data.query?.pages || {};
+    /** @type {ImageCandidate[]} */
+    const out = [];
+    for (const page of Object.values(pages)) {
+      const thumb = page.thumbnail?.source;
+      if (!thumb) continue;
+      out.push({
+        url: thumb,
+        thumb,
+        source: 'wikimedia',
+        credit: 'Wikimedia Commons',
+        pageUrl: page.fullurl || page.canonicalurl || '',
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Openverse — free CC/public-domain image search, no API key. */
+async function searchOpenverseImages(query, limit = 6) {
+  if (!query) return [];
+  const params = new URLSearchParams({
+    q: query,
+    page_size: String(Math.min(limit, 12)),
+    // Prefer licenses that allow reuse (public domain / attribution)
+    license: 'cc0,pdm,by,by-sa',
+  });
+  try {
+    const res = await fetch(`https://api.openverse.org/v1/images/?${params}`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    return results.slice(0, limit).map((item) => {
+      // Prefer direct media URL (thumbnail is often an API proxy path)
+      const media = item.url || item.thumbnail;
+      return {
+        url: media,
+        thumb: media,
+        source: 'openverse',
+        credit: [item.creator, item.license].filter(Boolean).join(' · ') || 'Openverse',
+        pageUrl: item.foreign_landing_url || item.detail_url || '',
+      };
+    }).filter((c) => c.url);
+  } catch {
+    return [];
+  }
+}
+
+async function searchUnsplashImages(query, limit = 6) {
+  const key = getImageSearchConfig().unsplashAccessKey;
+  if (!key || !query) return [];
+  const params = new URLSearchParams({
+    query,
+    per_page: String(Math.min(limit, 12)),
+    orientation: 'squarish',
+  });
+  try {
+    const res = await fetch(`https://api.unsplash.com/search/photos?${params}`, {
+      headers: {
+        Authorization: `Client-ID ${key}`,
+        'Accept-Version': 'v1',
+      },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    return results.slice(0, limit).map((item) => {
+      const urls = item.urls || {};
+      const url = urls.regular || urls.small || urls.thumb;
+      const thumb = urls.small || urls.thumb || urls.regular;
+      const name = item.user?.name || 'Unsplash';
+      return {
+        url,
+        thumb,
+        source: 'unsplash',
+        credit: `Photo by ${name} on Unsplash`,
+        pageUrl: item.links?.html || item.user?.links?.html || '',
+      };
+    }).filter((c) => c.url);
+  } catch {
+    return [];
+  }
+}
+
+async function searchPexelsImages(query, limit = 6) {
+  const key = getImageSearchConfig().pexelsApiKey;
+  if (!key || !query) return [];
+  const params = new URLSearchParams({
+    query,
+    per_page: String(Math.min(limit, 12)),
+  });
+  try {
+    const res = await fetch(`https://api.pexels.com/v1/search?${params}`, {
+      headers: { Authorization: key },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const photos = Array.isArray(data.photos) ? data.photos : [];
+    return photos.slice(0, limit).map((item) => {
+      const src = item.src || {};
+      const url = src.large || src.medium || src.original;
+      const thumb = src.medium || src.small || src.tiny || url;
+      return {
+        url,
+        thumb,
+        source: 'pexels',
+        credit: item.photographer ? `Photo by ${item.photographer} on Pexels` : 'Pexels',
+        pageUrl: item.url || item.photographer_url || '',
+      };
+    }).filter((c) => c.url);
+  } catch {
+    return [];
+  }
+}
+
+async function searchPixabayImages(query, limit = 6) {
+  const key = getImageSearchConfig().pixabayApiKey;
+  if (!key || !query) return [];
+  const params = new URLSearchParams({
+    key,
+    q: query,
+    image_type: 'photo',
+    safesearch: 'true',
+    per_page: String(Math.min(Math.max(limit, 3), 20)),
+  });
+  try {
+    const res = await fetch(`https://pixabay.com/api/?${params}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const hits = Array.isArray(data.hits) ? data.hits : [];
+    return hits.slice(0, limit).map((item) => ({
+      url: item.largeImageURL || item.webformatURL,
+      thumb: item.previewURL || item.webformatURL,
+      source: 'pixabay',
+      credit: item.user ? `Photo by ${item.user} on Pixabay` : 'Pixabay',
+      pageUrl: item.pageURL || '',
+    })).filter((c) => c.url);
+  } catch {
+    return [];
+  }
+}
+
+const IMAGE_SOURCE_LABELS = {
+  wikimedia: 'Wikimedia',
+  openverse: 'Openverse',
+  unsplash: 'Unsplash',
+  pexels: 'Pexels',
+  pixabay: 'Pixabay',
+};
+
+function availableImageSources() {
+  const cfg = getImageSearchConfig();
+  return {
+    wikimedia: true,
+    openverse: true,
+    unsplash: !!cfg.unsplashAccessKey,
+    pexels: !!cfg.pexelsApiKey,
+    pixabay: !!cfg.pixabayApiKey,
+  };
+}
+
+/**
+ * Search one or more legal photo sources.
+ * @param {string} query
+ * @param {{ sources?: string[], limitPerSource?: number }} [opts]
+ * @returns {Promise<ImageCandidate[]>}
+ */
+async function searchImageSources(query, opts = {}) {
+  const q = (query || '').trim();
+  if (!q) return [];
+  const limitPerSource = opts.limitPerSource || 6;
+  const avail = availableImageSources();
+  let sources = opts.sources && opts.sources.length ? opts.sources.slice() : ['wikimedia', 'openverse', 'unsplash', 'pexels', 'pixabay'];
+  if (sources.includes('all')) {
+    sources = ['wikimedia', 'openverse', 'unsplash', 'pexels', 'pixabay'];
+  }
+  sources = sources.filter((s) => avail[s]);
+
+  const tasks = sources.map(async (source) => {
+    if (source === 'wikimedia') return searchWikimediaImages(q, limitPerSource);
+    if (source === 'openverse') return searchOpenverseImages(q, limitPerSource);
+    if (source === 'unsplash') return searchUnsplashImages(q, limitPerSource);
+    if (source === 'pexels') return searchPexelsImages(q, limitPerSource);
+    if (source === 'pixabay') return searchPixabayImages(q, limitPerSource);
+    return [];
+  });
+
+  const batches = await Promise.all(tasks);
+  /** @type {ImageCandidate[]} */
+  const merged = [];
+  const seen = new Set();
+  for (const batch of batches) {
+    for (const item of batch) {
+      if (!item?.url || seen.has(item.url)) continue;
+      seen.add(item.url);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Live multi-source photo search for a word (cached in localStorage).
+ * Used during gameplay to fill missing pictures (first hit wins).
+ * Returns URL string or null.
+ */
+async function resolveOnlineImage(word, force = false) {
+  let cache = {};
+  try {
+    cache = JSON.parse(localStorage.getItem(ONLINE_IMAGE_CACHE_KEY) || '{}');
+  } catch {}
+
+  const key = `${word.hanzi}|${word.pinyin || ''}`;
+  if (!force && cache[key] !== undefined) {
+    return cache[key];
+  }
+
+  const queries = buildImageSearchQueries(word);
+  let foundUrl = null;
+
+  // Prefer free no-key sources first for auto-fill, then keyed APIs if configured
+  const autoSources = ['wikimedia', 'openverse', 'unsplash', 'pexels', 'pixabay'];
+  for (const q of queries) {
+    if (foundUrl) break;
+    for (const source of autoSources) {
+      if (!availableImageSources()[source]) continue;
+      const hits = await searchImageSources(q, { sources: [source], limitPerSource: 1 });
+      if (hits[0]?.url) {
+        foundUrl = hits[0].url;
+        break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+
+  cache[key] = foundUrl || null;
+  try {
+    localStorage.setItem(ONLINE_IMAGE_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+  return foundUrl || null;
 }
 
 function sharedLibraryEnabled() {
@@ -366,79 +672,78 @@ function isCustomReadingMode() {
   return !!(customFlow && customFlow.style.display !== 'none');
 }
 
-/**
- * Live Wikimedia Commons search for a word (cached in localStorage).
- * Returns URL string or null. Does not apply user overrides.
- */
-async function resolveOnlineImage(word, force = false) {
-  let cache = {};
-  try {
-    cache = JSON.parse(localStorage.getItem(ONLINE_IMAGE_CACHE_KEY) || '{}');
-  } catch {}
-
-  const key = `${word.hanzi}|${word.pinyin || ''}`;
-  if (!force && cache[key] !== undefined) {
-    return cache[key];
-  }
-
-  const queries = [];
-  if (word.meaning) {
-    const english = word.meaning.toLowerCase()
-      .replace(/[^a-z\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 2 && !['the', 'and', 'for', 'with', 'from', 'to', 'a', 'an', 'of', 'sth', 'sb'].includes(w))
-      .slice(0, 5)
-      .join(' ');
-    if (english) {
-      queries.push(`${english} photo`);
-      queries.push(english);
-    }
-  }
-  if (word.hanzi) queries.push(word.hanzi);
-
-  let foundUrl = null;
-  for (const q of queries) {
-    if (foundUrl) break;
-    const params = new URLSearchParams({
-      action: 'query',
-      generator: 'search',
-      gsrsearch: q,
-      gsrnamespace: '6',
-      gsrlimit: '8',
-      prop: 'pageimages',
-      piprop: 'thumbnail',
-      pithumbsize: '450',
-      format: 'json',
-      origin: '*',
-    });
-
-    try {
-      const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
-        headers: { 'User-Agent': 'ChineseWordMatching/1.0 (educational language game)' },
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const pages = data.query?.pages || {};
-      for (const page of Object.values(pages)) {
-        const thumb = page.thumbnail?.source;
-        if (thumb) {
-          foundUrl = thumb;
-          break;
-        }
-      }
-    } catch (e) { /* ignore */ }
-    await new Promise((r) => setTimeout(r, 80));
-  }
-
-  cache[key] = foundUrl || null;
-  try {
-    localStorage.setItem(ONLINE_IMAGE_CACHE_KEY, JSON.stringify(cache));
-  } catch {}
-  return foundUrl || null;
-}
-
 function getImageSrc(image) {
   return image.url || '';
+}
+
+function getSelectedImageSource() {
+  const active = document.querySelector('#image-source-chips .image-source-chip.is-active');
+  return (active && active.dataset.source) || 'all';
+}
+
+function updateImageSourceChipAvailability() {
+  const avail = availableImageSources();
+  const chips = document.querySelectorAll('#image-source-chips .image-source-chip');
+  chips.forEach((chip) => {
+    const src = chip.dataset.source;
+    if (src === 'all') {
+      chip.disabled = false;
+      chip.title = 'Search all configured sources';
+      return;
+    }
+    const ok = !!avail[src];
+    chip.disabled = !ok;
+    chip.title = ok
+      ? `Search ${IMAGE_SOURCE_LABELS[src] || src}`
+      : `${IMAGE_SOURCE_LABELS[src] || src}: add API key in config.js`;
+    if (!ok) chip.classList.remove('is-active');
+  });
+  const active = document.querySelector('#image-source-chips .image-source-chip.is-active');
+  if (!active || active.disabled) {
+    document.querySelector('#image-source-chips .image-source-chip[data-source="all"]')?.classList.add('is-active');
+  }
+  const hint = document.getElementById('image-search-hint');
+  if (hint) {
+    const cfg = getImageSearchConfig();
+    const missing = [];
+    if (!cfg.unsplashAccessKey) missing.push('Unsplash');
+    if (!cfg.pexelsApiKey) missing.push('Pexels');
+    if (!cfg.pixabayApiKey) missing.push('Pixabay');
+    if (missing.length) {
+      hint.textContent = `Wikimedia & Openverse work with no key. Optional: add ${missing.join(' / ')} keys in config.js for more photos.`;
+    } else {
+      hint.textContent = 'All sources enabled. Click a thumbnail to try it, then Save.';
+    }
+  }
+}
+
+function renderImageSearchResults(candidates, { onSelect } = {}) {
+  const resultsEl = document.getElementById('image-edit-results');
+  if (!resultsEl) return;
+  resultsEl.innerHTML = '';
+  if (!candidates || !candidates.length) {
+    resultsEl.hidden = true;
+    return;
+  }
+  resultsEl.hidden = false;
+  candidates.forEach((item, index) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'image-result-card';
+    btn.dataset.index = String(index);
+    const label = IMAGE_SOURCE_LABELS[item.source] || item.source;
+    btn.title = `${label}${item.credit ? ' — ' + item.credit : ''}`;
+    btn.innerHTML = `
+      <img src="${item.thumb || item.url}" alt="" loading="lazy" referrerpolicy="no-referrer">
+      <span class="image-result-source">${label}</span>
+    `;
+    btn.addEventListener('click', () => {
+      resultsEl.querySelectorAll('.image-result-card').forEach((el) => el.classList.remove('is-selected'));
+      btn.classList.add('is-selected');
+      if (typeof onSelect === 'function') onSelect(item);
+    });
+    resultsEl.appendChild(btn);
+  });
 }
 
 /** Open modal to change picture for a word (writes to shared library). onDone() after change. */
@@ -450,8 +755,11 @@ function openImageEditModal(word, onDone) {
   const metaEl = document.getElementById('image-edit-meta');
   const previewEl = document.getElementById('image-edit-preview');
   const urlInput = document.getElementById('image-edit-url');
+  const queryInput = document.getElementById('image-edit-query');
   const statusEl = document.getElementById('image-edit-status');
   const sharedHint = document.getElementById('image-edit-shared-hint');
+  const resultsEl = document.getElementById('image-edit-results');
+  const attributionEl = document.getElementById('image-edit-attribution');
 
   const imgInfo = getWordImage(word);
   const lib = sharedLibrary();
@@ -472,13 +780,25 @@ function openImageEditModal(word, onDone) {
   if (urlInput) {
     urlInput.value = (imgInfo.url && imgInfo.source === 'shared') ? imgInfo.url : (imgInfo.url || '');
   }
+  if (queryInput) {
+    queryInput.value = defaultSearchQuery(word);
+  }
   if (statusEl) statusEl.textContent = '';
+  if (resultsEl) {
+    resultsEl.innerHTML = '';
+    resultsEl.hidden = true;
+  }
+  if (attributionEl) {
+    attributionEl.hidden = true;
+    attributionEl.textContent = '';
+  }
   if (sharedHint) {
     sharedHint.textContent = sharedLibraryEnabled()
       ? 'Edits are saved to the shared library for everyone and keep working after site updates.'
       : 'Shared library is not configured — set config.js (Supabase) so all users can share image edits.';
     sharedHint.classList.toggle('image-edit-shared-hint--warn', !sharedLibraryEnabled());
   }
+  updateImageSourceChipAvailability();
 
   function showPreview(url) {
     if (!previewEl) return;
@@ -488,7 +808,41 @@ function openImageEditModal(word, onDone) {
       previewEl.innerHTML = '<span class="image-edit-broken">No picture — English meaning will show in game</span>';
     }
   }
+
+  function showAttribution(candidate) {
+    if (!attributionEl) return;
+    if (!candidate) {
+      attributionEl.hidden = true;
+      attributionEl.textContent = '';
+      return;
+    }
+    const parts = [];
+    if (candidate.credit) parts.push(candidate.credit);
+    else if (candidate.source) parts.push(IMAGE_SOURCE_LABELS[candidate.source] || candidate.source);
+    attributionEl.textContent = parts.join(' · ');
+    attributionEl.hidden = !parts.length;
+  }
+
+  function selectCandidate(item) {
+    const urlIn = document.getElementById('image-edit-url');
+    const st = document.getElementById('image-edit-status');
+    if (urlIn) urlIn.value = item.url || '';
+    showPreview(item.url);
+    showAttribution(item);
+    modal._selectedCandidate = item;
+    if (st) {
+      const label = IMAGE_SOURCE_LABELS[item.source] || item.source;
+      st.textContent = `Selected from ${label}. Click Save to share with everyone.`;
+    }
+  }
+
+  // Re-bound each open so one-time listeners always use current helpers
+  modal._showPreview = showPreview;
+  modal._showAttribution = showAttribution;
+  modal._selectCandidate = selectCandidate;
+
   showPreview(imgInfo.url);
+  modal._selectedCandidate = null;
 
   modal.hidden = false;
   modal.dataset.hanzi = word.hanzi || '';
@@ -502,11 +856,12 @@ function openImageEditModal(word, onDone) {
       modal.hidden = true;
       modal._editWord = null;
       modal._onDone = null;
+      modal._selectedCandidate = null;
     };
 
     async function runAction(fn) {
       const st = document.getElementById('image-edit-status');
-      const buttons = modal.querySelectorAll('.image-edit-actions button');
+      const buttons = modal.querySelectorAll('.image-edit-actions button, #image-edit-search');
       buttons.forEach((b) => { b.disabled = true; });
       try {
         await fn(st);
@@ -521,18 +876,52 @@ function openImageEditModal(word, onDone) {
     document.getElementById('image-edit-cancel')?.addEventListener('click', close);
     modal.querySelector('.image-edit-backdrop')?.addEventListener('click', close);
 
+    document.getElementById('image-source-chips')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.image-source-chip');
+      if (!chip || chip.disabled) return;
+      document.querySelectorAll('#image-source-chips .image-source-chip').forEach((c) => c.classList.remove('is-active'));
+      chip.classList.add('is-active');
+    });
+
+    document.getElementById('image-edit-url-clear')?.addEventListener('click', () => {
+      const urlIn = document.getElementById('image-edit-url');
+      const st = document.getElementById('image-edit-status');
+      if (urlIn) {
+        urlIn.value = '';
+        urlIn.focus();
+      }
+      if (typeof modal._showPreview === 'function') modal._showPreview(null);
+      if (typeof modal._showAttribution === 'function') modal._showAttribution(null);
+      modal._selectedCandidate = null;
+      if (st) st.textContent = 'URL field cleared (not saved yet).';
+    });
+
+    document.getElementById('image-edit-url')?.addEventListener('input', () => {
+      const url = (document.getElementById('image-edit-url')?.value || '').trim();
+      if (typeof modal._showPreview === 'function') modal._showPreview(url || null);
+      if (typeof modal._showAttribution === 'function') modal._showAttribution(null);
+      modal._selectedCandidate = null;
+    });
+
     document.getElementById('image-edit-save')?.addEventListener('click', () => {
       runAction(async (st) => {
         const w = modal._editWord;
         const url = (document.getElementById('image-edit-url')?.value || '').trim();
         if (!w) return;
         if (!url) {
-          if (st) st.textContent = 'Paste an https:// image URL, or use “No image”.';
+          if (st) st.textContent = 'Paste an https:// image URL, or pick a search result, or use “No image”.';
           return;
         }
-        await setImageOverride(w.hanzi, url, { pinyin: w.pinyin, meaning: w.meaning });
+        const cand = modal._selectedCandidate;
+        await setImageOverride(w.hanzi, url, {
+          pinyin: w.pinyin,
+          meaning: w.meaning,
+          source: cand?.source || undefined,
+          credit: cand?.credit || undefined,
+        });
+        if (w.hanzi) currentImageMap[w.hanzi] = url;
         if (st) st.textContent = 'Saved to shared library for all users.';
-        showPreview(url);
+        if (typeof modal._showPreview === 'function') modal._showPreview(url);
         if (typeof modal._onDone === 'function') modal._onDone();
         setTimeout(close, 500);
       });
@@ -544,7 +933,8 @@ function openImageEditModal(word, onDone) {
         if (!w) return;
         await setImageOverride(w.hanzi, null, { pinyin: w.pinyin, meaning: w.meaning });
         if (st) st.textContent = 'Shared: this word uses text only (no picture) for everyone.';
-        showPreview(null);
+        if (typeof modal._showPreview === 'function') modal._showPreview(null);
+        if (typeof modal._showAttribution === 'function') modal._showAttribution(null);
         if (typeof modal._onDone === 'function') modal._onDone();
         setTimeout(close, 500);
       });
@@ -558,31 +948,55 @@ function openImageEditModal(word, onDone) {
         if (w.hanzi) delete currentImageMap[w.hanzi];
         if (st) st.textContent = 'Removed from shared library — using built-in / online default.';
         const next = getWordImage(w);
-        showPreview(next.url);
+        if (typeof modal._showPreview === 'function') modal._showPreview(next.url);
         const urlIn = document.getElementById('image-edit-url');
         if (urlIn) urlIn.value = next.url || '';
+        if (typeof modal._showAttribution === 'function') modal._showAttribution(null);
         if (typeof modal._onDone === 'function') modal._onDone();
       });
     });
 
-    document.getElementById('image-edit-search')?.addEventListener('click', () => {
+    const runSearch = () => {
       runAction(async (st) => {
         const w = modal._editWord;
         if (!w) return;
-        if (st) st.textContent = 'Searching Wikimedia…';
-        const url = await resolveOnlineImage(w, true);
-        if (!url) {
-          if (st) st.textContent = 'No Wikimedia image found. Try pasting a URL.';
+        const q = (document.getElementById('image-edit-query')?.value || '').trim() || defaultSearchQuery(w);
+        const source = getSelectedImageSource();
+        const sources = source === 'all' ? ['all'] : [source];
+        const avail = availableImageSources();
+        if (source !== 'all' && !avail[source]) {
+          if (st) st.textContent = `${IMAGE_SOURCE_LABELS[source] || source} needs an API key in config.js.`;
           return;
         }
-        currentImageMap[w.hanzi] = url;
-        await setImageOverride(w.hanzi, url, { pinyin: w.pinyin, meaning: w.meaning });
-        const urlIn = document.getElementById('image-edit-url');
-        if (urlIn) urlIn.value = url;
-        showPreview(url);
-        if (st) st.textContent = 'Found and saved to shared library.';
-        if (typeof modal._onDone === 'function') modal._onDone();
+        if (st) st.textContent = `Searching ${source === 'all' ? 'all sources' : (IMAGE_SOURCE_LABELS[source] || source)}…`;
+        const candidates = await searchImageSources(q, {
+          sources,
+          limitPerSource: source === 'all' ? 4 : 10,
+        });
+        if (!candidates.length) {
+          renderImageSearchResults([]);
+          if (st) {
+            st.textContent = source === 'all'
+              ? 'No photos found. Try a shorter English query, or add Unsplash/Pexels/Pixabay keys.'
+              : `No photos from ${IMAGE_SOURCE_LABELS[source] || source}. Try another source or query.`;
+          }
+          return;
+        }
+        renderImageSearchResults(candidates, {
+          onSelect: (item) => {
+            if (typeof modal._selectCandidate === 'function') modal._selectCandidate(item);
+          },
+        });
+        if (st) st.textContent = `Found ${candidates.length} photo(s). Click one to preview, then Save.`;
       });
+    };
+
+    document.getElementById('image-edit-search')?.addEventListener('click', runSearch);
+    document.getElementById('image-edit-query')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        runSearch();
+      }
     });
   }
 }
@@ -1199,7 +1613,7 @@ function startGame() {
   tickTimer = setInterval(gameTick, TICK_MS);
   updateBoard(true);
 
-  // Fill missing pictures via Wikimedia (skip words with user override or built-in image)
+  // Fill missing pictures via live multi-source search (skip shared / built-in)
   improveImagesWithOnline(currentSetWords);
 }
 
@@ -1848,6 +2262,16 @@ function initPictureGame(vocabulary) {
   // ---- Add-your-own-words form ----
   const addWordForm = document.getElementById('add-word-form');
   const addWordCheckBtn = document.getElementById('add-word-check');
+  const addImageUrlClear = document.getElementById('add-image-url-clear');
+  if (addImageUrlClear) {
+    addImageUrlClear.addEventListener('click', () => {
+      const imgEl = document.getElementById('add-image-url');
+      if (imgEl) {
+        imgEl.value = '';
+        imgEl.focus();
+      }
+    });
+  }
 
   function readAddWordForm() {
     return {
