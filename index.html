@@ -30,15 +30,15 @@
         <div class="menu-intro">
           <h2>Practice Chinese Vocabulary</h2>
           <p>Build your Chinese word recognition with fun matching games.<br>
-          Practice with readings, ready-made sets, or words you add yourself:</p>
+          Practice with graded readings, saved word sets, ready-made HSK groups, or words you add yourself:</p>
         </div>
 
         <div class="menu-cards">
           <div class="menu-card">
-            <div class="menu-icon">📝</div>
-            <h3>Use your own reading</h3>
-            <p>Paste a short Chinese passage or dialogue. Filter by HSK level, extract the vocabulary, then play the matching game with exactly those words.</p>
-            <button id="start-custom-btn" class="btn btn-learned btn-large">Paste reading &amp; extract words</button>
+            <div class="menu-icon">📖</div>
+            <h3>Reading practice</h3>
+            <p>Pick an HSK level, choose a passage from the collection, load today’s reading, or paste your own text. Extract words and play.</p>
+            <button id="start-custom-btn" class="btn btn-learned btn-large">Open readings</button>
           </div>
 
           <div class="menu-card">
@@ -46,6 +46,13 @@
             <h3>Practice ready-made sets</h3>
             <p>Choose HSK levels and play with pre-grouped vocabulary sets. Perfect for regular daily practice.</p>
             <button id="start-sets-btn" class="btn btn-learned btn-large">Browse practice sets</button>
+          </div>
+
+          <div class="menu-card">
+            <div class="menu-icon">💾</div>
+            <h3>My saved word sets</h3>
+            <p>Load word lists you saved from readings to practice again later. Stored in this browser.</p>
+            <button id="start-saved-sets-btn" class="btn btn-learned btn-large">Open saved sets</button>
           </div>
 
           <div class="menu-card">
@@ -115,44 +122,110 @@
         <div id="user-words-list" class="extracted-list user-words-list"></div>
       </div>
 
-      <!-- CUSTOM READING FLOW -->
+      <!-- READING FLOW -->
       <div id="custom-flow" style="display:none;">
         <button class="back-btn" id="back-from-custom">← Back to menu</button>
 
-        <!-- 1. Input Reading — stays visible even while a game is running -->
         <div class="custom-reading" id="reading-input">
+          <div class="section-header">
+            <strong>Reading practice</strong>
+            <span class="hint">1) Choose HSK level · 2) Pick a collection reading, today’s reading, or paste your own · 3) Extract words &amp; play</span>
+          </div>
+
+          <!-- Step 1: primary HSK level for collection / daily -->
+          <div class="reading-level-row">
+            <label for="reading-hsk-level"><span class="hsk-label">HSK level</span></label>
+            <select id="reading-hsk-level" class="reading-hsk-select">
+              <option value="1">HSK 1</option>
+              <option value="2">HSK 2</option>
+              <option value="3" selected>HSK 3</option>
+              <option value="4">HSK 4</option>
+              <option value="5">HSK 5</option>
+              <option value="6">HSK 6</option>
+            </select>
+          </div>
+
+          <!-- Source tabs -->
+          <div class="reading-source-tabs" role="tablist" aria-label="Reading source">
+            <button type="button" class="reading-source-tab is-active" data-source="collection" id="reading-tab-collection">Collection</button>
+            <button type="button" class="reading-source-tab" data-source="daily" id="reading-tab-daily">Today’s reading</button>
+            <button type="button" class="reading-source-tab" data-source="paste" id="reading-tab-paste">Paste your own</button>
+          </div>
+
+          <!-- Collection picker -->
+          <div id="reading-source-collection" class="reading-source-panel">
+            <label class="reading-field-label" for="lesson-select">Choose a reading</label>
+            <div class="set-picker-row">
+              <select id="lesson-select">
+                <option value="">— Select a passage —</option>
+              </select>
+              <button type="button" class="btn btn-secondary" id="load-collection-reading">Load</button>
+            </div>
+            <p id="lesson-reading-meta" class="lesson-desc" hidden></p>
+          </div>
+
+          <!-- Daily reading -->
+          <div id="reading-source-daily" class="reading-source-panel" hidden>
+            <p class="reading-daily-blurb">Loads one reading for the selected HSK level for <strong>today</strong> (same day → same text). Tries an open web source first, then falls back to the graded collection.</p>
+            <button type="button" class="btn btn-primary" id="load-daily-reading">Load today’s reading</button>
+            <p id="daily-reading-status" class="extract-info" aria-live="polite"></p>
+          </div>
+
+          <!-- Paste -->
+          <div id="reading-source-paste" class="reading-source-panel" hidden>
+            <label class="reading-field-label" for="custom-reading-text">Your Chinese text</label>
+            <textarea id="custom-reading-text" rows="6" placeholder="Paste Chinese text here, e.g. a short story or dialogue..."></textarea>
+          </div>
+
+          <!-- Shared text display / editor after load -->
+          <div id="lesson-reading" class="lesson-reading-box" hidden>
+            <div class="lesson-reading-header">
+              <strong id="lesson-reading-title">Reading</strong>
+              <span id="lesson-reading-desc" class="lesson-desc"></span>
+            </div>
+            <div id="lesson-reading-body" class="lesson-reading-body"></div>
+            <p class="reading-edit-hint">You can edit the text below before extracting words.</p>
+            <textarea id="active-reading-text" rows="5" class="active-reading-textarea" hidden></textarea>
+          </div>
+
+          <!-- Extract filters: include this level and below by default -->
+          <div class="hsk-levels">
+            <span class="hsk-label">Extract words at HSK level(s):</span>
+            <div class="checkbox-group">
+              <label class="hsk-cb"><input type="checkbox" value="1" checked> HSK 1</label>
+              <label class="hsk-cb"><input type="checkbox" value="2" checked> HSK 2</label>
+              <label class="hsk-cb"><input type="checkbox" value="3" checked> HSK 3</label>
+              <label class="hsk-cb"><input type="checkbox" value="4" checked> HSK 4</label>
+              <label class="hsk-cb"><input type="checkbox" value="5" checked> HSK 5</label>
+              <label class="hsk-cb"><input type="checkbox" value="6"> HSK 6</label>
+            </div>
+            <div class="level-actions">
+              <button type="button" id="select-all-levels" class="small-btn">All</button>
+              <button type="button" id="clear-levels" class="small-btn">None</button>
+              <button type="button" id="levels-up-to-reading" class="small-btn" title="Check HSK 1 through the selected reading level">Up to level</button>
+            </div>
+          </div>
+
+          <div class="extract-actions">
+            <button id="extract-custom-btn" class="btn btn-primary">Extract words from reading</button>
+            <button id="save-word-set-btn" class="btn btn-secondary" style="display:none;">Save word set</button>
+            <button id="clear-custom-btn" class="btn btn-secondary" style="display:none;">Clear</button>
+          </div>
+
+          <div id="custom-extract-info" class="extract-info"></div>
+        </div>
+      </div>
+
+      <!-- SAVED WORD SETS FLOW -->
+      <div id="saved-sets-flow" style="display:none;">
+        <button class="back-btn" id="back-from-saved-sets">← Back to menu</button>
         <div class="section-header">
-          <strong>Paste your reading</strong>
-          <span class="hint">Paste Chinese text, then pick HSK levels and extract vocabulary. You can change the text anytime and extract again.</span>
+          <strong>My saved word sets</strong>
+          <span class="hint">Sets you saved from readings. Stored in this browser only.</span>
         </div>
-
-        <textarea id="custom-reading-text" rows="6" placeholder="Paste Chinese text here, e.g. a short story or dialogue...">学习汉语并不容易，但是只要你坚持练习，就一定能成功。每天抽出一点时间阅读、背单词和说中文，你会发现自己的进步。不要害怕犯错误，错误其实是最好的老师。保持乐观的态度，遇到困难的时候互相鼓励。只要你有足够的决心和耐心，就一定能够达到自己的目标。相信自己，继续努力，你一定行！加油！</textarea>
-
-        <!-- HSK filters after the text box -->
-        <div class="hsk-levels">
-          <span class="hsk-label">Filter words by HSK level(s):</span>
-          <div class="checkbox-group">
-            <label class="hsk-cb"><input type="checkbox" value="1" checked> HSK 1</label>
-            <label class="hsk-cb"><input type="checkbox" value="2" checked> HSK 2</label>
-            <label class="hsk-cb"><input type="checkbox" value="3" checked> HSK 3</label>
-            <label class="hsk-cb"><input type="checkbox" value="4" checked> HSK 4</label>
-            <label class="hsk-cb"><input type="checkbox" value="5" checked> HSK 5</label>
-            <label class="hsk-cb"><input type="checkbox" value="6"> HSK 6</label>
-          </div>
-          <div class="level-actions">
-            <button type="button" id="select-all-levels" class="small-btn">All</button>
-            <button type="button" id="clear-levels" class="small-btn">None</button>
-          </div>
-        </div>
-
-        <div class="extract-actions">
-          <button id="extract-custom-btn" class="btn btn-primary">Extract Words from Reading</button>
-          <button id="clear-custom-btn" class="btn btn-secondary" style="display:none;">Clear</button>
-        </div>
-
-        <div id="custom-extract-info" class="extract-info"></div>
-      </div> <!-- end #reading-input (custom only) -->
-      </div> <!-- end #custom-flow -->
+        <div id="saved-sets-list" class="saved-sets-list"></div>
+        <p id="saved-sets-empty" class="extract-info" hidden>No saved sets yet. Extract words from a reading, then click <strong>Save word set</strong>.</p>
+      </div>
 
       <!-- SETS header (shown only in sets mode, before the shared panel for correct order) -->
       <div id="sets-flow" style="display:none;">
@@ -311,6 +384,7 @@
   <script src="image-library.js"></script>
   <script src="vocabulary.js" charset="utf-8"></script>
   <script src="images.js" charset="utf-8"></script>
+  <script src="readings.js" charset="utf-8"></script>
   <script src="picture-game.js"></script>
   <script src="main.js"></script>
 </body>

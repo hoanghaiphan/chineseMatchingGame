@@ -4,8 +4,9 @@ A bilingual Chinese (HSK) vocabulary matching game.
 
 ## Modes
 
-- **Use your own reading** — Paste Chinese text, filter by HSK, extract words, play matching.
+- **Reading practice** — Pick HSK level → choose a passage from the graded **collection**, load **today’s reading** (open web + daily cache, collection fallback), or **paste** your own text. Extract words and play.
 - **Ready-made sets** — Practice HSK-level word groups.
+- **My saved word sets** — Save extracted word lists to this browser and practice them again later.
 - **Add your own words** — Add missing vocabulary (and optional image URLs) stored in this browser.
 
 ## Features
@@ -101,6 +102,7 @@ This regenerates `images.js` with Wikimedia thumbnail links. Redeploy the site t
 | `main.js` | Boot |
 | `picture-game.js` | Game, extract, user words, image UI |
 | `vocabulary.js` | HSK data |
+| `readings.js` | Graded HSK reading collection |
 | `images.js` | Built-in word → image URL map (defaults) |
 | `build-images.js` | Rebuild `images.js` |
 | `styles.css` | Styling |

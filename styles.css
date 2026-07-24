@@ -918,6 +918,139 @@ body {
   text-align: left;
 }
 
+.reading-level-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.75rem;
+  flex-wrap: wrap;
+}
+.reading-hsk-select {
+  font-size: 0.95rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid rgba(194, 59, 59, 0.25);
+  background: #fff;
+  min-width: 7.5rem;
+}
+.reading-source-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+.reading-source-tab {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: #fff;
+  color: var(--ink, #1a1a1a);
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.reading-source-tab:hover {
+  border-color: var(--green, #2d6a4f);
+}
+.reading-source-tab.is-active {
+  background: var(--green, #2d6a4f);
+  border-color: var(--green, #2d6a4f);
+  color: #fff;
+}
+.reading-source-panel {
+  margin-bottom: 0.75rem;
+}
+.reading-field-label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+.reading-daily-blurb {
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.4;
+  margin: 0 0 0.6rem;
+}
+.lesson-reading-box {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+}
+.lesson-reading-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-bottom: 0.4rem;
+}
+.lesson-reading-body {
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", "SimHei", sans-serif;
+  font-size: 1.02rem;
+  line-height: 1.65;
+  color: var(--ink);
+  white-space: pre-wrap;
+  margin-bottom: 0.45rem;
+}
+.reading-edit-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0 0 0.3rem;
+}
+.active-reading-textarea {
+  width: 100%;
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", "SimHei", sans-serif !important;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid rgba(194, 59, 59, 0.2);
+  border-radius: 8px;
+  resize: vertical;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  margin-bottom: 0;
+}
+.saved-sets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin: 0.75rem 0;
+}
+.saved-set-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.75rem 0.9rem;
+  background: #faf7f2;
+  border: 1px solid rgba(194, 59, 59, 0.12);
+  border-radius: 12px;
+}
+.saved-set-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1;
+}
+.saved-set-name {
+  font-size: 1rem;
+}
+.saved-set-meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.saved-set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.saved-set-actions .btn {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.7rem;
+}
+
 .custom-reading .section-header {
   font-size: 0.95rem;
   margin-bottom: 0.5rem;

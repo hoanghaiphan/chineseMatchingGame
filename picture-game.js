@@ -131,42 +131,230 @@ function removeUserWord(hanzi) {
   return true;
 }
 
-// Sample lessons for integration: Reading first, then practice words from it
-const LESSONS = [
-  {
-    id: "hsk1-daily",
-    level: "1",
-    title: "HSK 1 - Daily Life",
-    text: "你好，我是学生。我喜欢狗和猫。今天天气很好。我去学校学习。",
-    description: "Simple daily conversation and activities."
-  },
-  {
-    id: "hsk1-food",
-    level: "1",
-    title: "HSK 1 - Food",
-    text: "我喜欢吃苹果和米饭。爸爸妈妈喜欢喝茶。我想喝牛奶。",
-    description: "Food and family preferences."
-  },
-  {
-    id: "hsk2-family",
-    level: "2",
-    title: "HSK 2 - My Family",
-    text: "我家有爸爸妈妈和我。我们住在北京。我的爸爸是老师。他喜欢看书。",
-    description: "Family and home description."
+/** Prefer global READING_COLLECTION from readings.js; keep tiny fallback. */
+function getReadingCollection() {
+  if (typeof READING_COLLECTION !== 'undefined' && Array.isArray(READING_COLLECTION)) {
+    return READING_COLLECTION;
   }
-];
+  return [];
+}
+
+const SAVED_WORD_SETS_KEY = 'chinese-saved-word-sets-v1';
+const DAILY_READING_CACHE_KEY = 'chinese-daily-reading-cache-v1';
+
+function loadSavedWordSets() {
+  try {
+    const raw = localStorage.getItem(SAVED_WORD_SETS_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedWordSets(list) {
+  try {
+    localStorage.setItem(SAVED_WORD_SETS_KEY, JSON.stringify(list || []));
+  } catch {}
+}
+
+/**
+ * @param {{ name: string, words: Array, source?: string, readingTitle?: string }} opts
+ */
+function addSavedWordSet(opts) {
+  const name = (opts.name || '').trim();
+  const words = Array.isArray(opts.words) ? opts.words : [];
+  if (!name) throw new Error('Please enter a name for this set.');
+  if (!words.length) throw new Error('No words to save. Extract words first.');
+
+  const cleanWords = words.map((w) => ({
+    hanzi: w.hanzi,
+    pinyin: w.pinyin || '',
+    meaning: w.meaning || '',
+    level: w.level || 0,
+  })).filter((w) => w.hanzi);
+
+  if (!cleanWords.length) throw new Error('No valid words to save.');
+
+  const list = loadSavedWordSets();
+  const entry = {
+    id: `set-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name,
+    createdAt: new Date().toISOString(),
+    source: opts.source || '',
+    readingTitle: opts.readingTitle || '',
+    words: cleanWords,
+  };
+  list.unshift(entry);
+  // Cap at 40 sets
+  saveSavedWordSets(list.slice(0, 40));
+  return entry;
+}
+
+function removeSavedWordSet(id) {
+  const next = loadSavedWordSets().filter((s) => s.id !== id);
+  saveSavedWordSets(next);
+  return next;
+}
 
 function getLessonWords(lesson, vocab) {
-  const textHanzi = lesson.text.replace(/[^\u4e00-\u9fa5]/g, ''); // extract hanzi only
-  const words = [];
-  const seen = new Set();
-  for (const w of vocab) {
-    if (textHanzi.includes(w.hanzi) && !seen.has(w.hanzi)) {
-      seen.add(w.hanzi);
-      words.push(w);
+  if (!lesson || !lesson.text) return [];
+  return extractWordsFromCustomText(lesson.text, vocab, []);
+}
+
+/** Calendar date key YYYY-MM-DD (local). */
+function localDateKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Score Chinese text for HSK suitability: fraction of matched tokens at or below level.
+ * Higher is better for graded daily readings.
+ */
+function scoreTextForHskLevel(text, vocab, maxLevel) {
+  const words = extractWordsFromCustomText(text, vocab, []);
+  if (!words.length) return { score: 0, matched: 0, atOrBelow: 0 };
+  const atOrBelow = words.filter((w) => Number(w.level) <= maxLevel).length;
+  const score = atOrBelow / words.length;
+  return { score, matched: words.length, atOrBelow };
+}
+
+/**
+ * Fetch a short Chinese Wikipedia summary (open API). May fail CORS / rate limits.
+ */
+async function fetchZhWikipediaSummary() {
+  const res = await fetch('https://zh.wikipedia.org/api/rest_v1/page/random/summary', {
+    headers: { Accept: 'application/json' },
+  });
+  if (!res.ok) throw new Error(`Wikipedia ${res.status}`);
+  const data = await res.json();
+  const title = data.title || 'Wikipedia';
+  const extract = (data.extract || '').trim();
+  if (!extract || extract.length < 40) throw new Error('Empty extract');
+  // Keep first ~2 paragraphs / reasonable length for practice
+  let text = extract;
+  if (text.length > 420) {
+    text = text.slice(0, 420);
+    const cut = Math.max(text.lastIndexOf('。'), text.lastIndexOf('！'), text.lastIndexOf('？'));
+    if (cut > 120) text = text.slice(0, cut + 1);
+  }
+  return {
+    title: `维基百科 · ${title}`,
+    description: 'Random Chinese Wikipedia summary (open web)',
+    text,
+    source: 'wikipedia',
+    pageUrl: data.content_urls?.desktop?.page || data.content_urls?.mobile?.page || '',
+  };
+}
+
+/**
+ * Today's reading for an HSK level:
+ * 1) localStorage cache for today+level
+ * 2) try a few Wikipedia random summaries; keep best HSK score
+ * 3) fallback: seeded graded collection
+ */
+async function loadDailyReadingForLevel(level, vocab) {
+  const hsk = Number(level) || 1;
+  const day = localDateKey();
+  const cacheKey = `${day}|${hsk}`;
+
+  let cache = {};
+  try {
+    cache = JSON.parse(localStorage.getItem(DAILY_READING_CACHE_KEY) || '{}');
+  } catch {
+    cache = {};
+  }
+  // Drop other days
+  for (const k of Object.keys(cache)) {
+    if (!k.startsWith(day)) delete cache[k];
+  }
+
+  if (cache[cacheKey] && cache[cacheKey].text) {
+    return { ...cache[cacheKey], fromCache: true };
+  }
+
+  let best = null;
+  let bestScore = -1;
+  const attempts = hsk <= 2 ? 2 : 4; // lower HSK rarely matches Wikipedia; fewer tries
+
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const item = await fetchZhWikipediaSummary();
+      const { score, matched, atOrBelow } = scoreTextForHskLevel(item.text, vocab, hsk);
+      // Prefer more known words and better coverage of ≤ HSK
+      const rank = matched >= 6 ? score * 10 + Math.min(matched, 30) * 0.01 : score;
+      if (rank > bestScore) {
+        bestScore = rank;
+        best = {
+          ...item,
+          level: hsk,
+          id: `daily-wiki-${day}-hsk${hsk}`,
+          hskScore: score,
+          matched,
+          atOrBelow,
+        };
+      }
+      // Good enough match for this level
+      if (matched >= 8 && score >= (hsk <= 3 ? 0.55 : 0.4)) break;
+    } catch {
+      // ignore single attempt
+    }
+    await new Promise((r) => setTimeout(r, 120));
+  }
+
+  // Only use Wikipedia if it has usable vocab for this level
+  if (best && best.matched >= 5 && best.hskScore >= 0.25) {
+    const result = {
+      id: best.id,
+      level: hsk,
+      title: best.title,
+      description: `${best.description} · ~${Math.round(best.hskScore * 100)}% words ≤ HSK ${hsk}`,
+      text: best.text,
+      source: 'wikipedia',
+      pageUrl: best.pageUrl || '',
+      day,
+    };
+    cache[cacheKey] = result;
+    try {
+      localStorage.setItem(DAILY_READING_CACHE_KEY, JSON.stringify(cache));
+    } catch {}
+    return { ...result, fromCache: false };
+  }
+
+  // Fallback: graded collection seeded by date
+  let seeded = null;
+  if (typeof getSeededDailyReading === 'function') {
+    seeded = getSeededDailyReading(hsk);
+  } else {
+    const list = getReadingCollection().filter((r) => Number(r.level) === hsk);
+    if (list.length) {
+      const seed = day.split('-').reduce((a, b) => a + Number(b), 0) + hsk * 17;
+      seeded = { ...list[seed % list.length], source: 'collection-daily' };
     }
   }
-  return words;
+
+  if (!seeded) {
+    throw new Error('No daily reading available for this level.');
+  }
+
+  const result = {
+    id: seeded.id || `daily-col-${day}-hsk${hsk}`,
+    level: hsk,
+    title: seeded.title || `今日阅读 HSK ${hsk}`,
+    description: (seeded.description || 'Graded collection') + ' · collection (web text too hard / unavailable)',
+    text: seeded.text,
+    source: 'collection-daily',
+    day,
+  };
+  cache[cacheKey] = result;
+  try {
+    localStorage.setItem(DAILY_READING_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+  return { ...result, fromCache: false };
 }
 
 function extractWordsFromCustomText(text, vocab, levels = []) {
@@ -2060,12 +2248,14 @@ function initPictureGame(vocabulary) {
   const practicePanel = document.getElementById('practice-panel');
   const setsFlow = document.getElementById('sets-flow');
   const addWordsFlow = document.getElementById('add-words-flow');
+  const savedSetsFlow = document.getElementById('saved-sets-flow');
 
   function showMenu() {
     if (menuView) menuView.style.display = '';
     if (customFlow) customFlow.style.display = 'none';
     if (setsFlow) setsFlow.style.display = 'none';
     if (addWordsFlow) addWordsFlow.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = 'none';
     if (practicePanel) practicePanel.style.display = 'none';
     // hide game if open
     const gameScreen = document.getElementById('picture-game-screen');
@@ -2130,6 +2320,7 @@ function initPictureGame(vocabulary) {
     if (menuView) menuView.style.display = 'none';
     if (customFlow) customFlow.style.display = 'none';
     if (setsFlow) setsFlow.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = 'none';
     if (practicePanel) practicePanel.style.display = 'none';
     if (addWordsFlow) addWordsFlow.style.display = '';
     const hint = document.querySelector('.picture-highscore-hint');
@@ -2144,10 +2335,122 @@ function initPictureGame(vocabulary) {
     if (hanziInput) hanziInput.focus();
   }
 
+  function updateSaveSetButton() {
+    const btn = document.getElementById('save-word-set-btn');
+    if (!btn) return;
+    btn.style.display = (customWords && customWords.length > 0) ? 'inline-block' : 'none';
+  }
+
+  function renderSavedSetsList() {
+    const listEl = document.getElementById('saved-sets-list');
+    const emptyEl = document.getElementById('saved-sets-empty');
+    if (!listEl) return;
+    const sets = loadSavedWordSets();
+    if (!sets.length) {
+      listEl.innerHTML = '';
+      if (emptyEl) emptyEl.hidden = false;
+      return;
+    }
+    if (emptyEl) emptyEl.hidden = true;
+    listEl.innerHTML = sets.map((s) => {
+      const date = s.createdAt ? new Date(s.createdAt).toLocaleDateString() : '';
+      const n = (s.words || []).length;
+      const src = s.readingTitle ? ` · from “${String(s.readingTitle).replace(/</g, '&lt;')}”` : '';
+      return `<div class="saved-set-card" data-id="${s.id}">
+        <div class="saved-set-info">
+          <strong class="saved-set-name">${String(s.name || 'Untitled').replace(/</g, '&lt;')}</strong>
+          <span class="saved-set-meta">${n} words${date ? ' · ' + date : ''}${src}</span>
+        </div>
+        <div class="saved-set-actions">
+          <button type="button" class="btn btn-learned saved-set-load" data-id="${s.id}">Practice</button>
+          <button type="button" class="btn btn-secondary saved-set-delete" data-id="${s.id}">Delete</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    listEl.querySelectorAll('.saved-set-load').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        const set = loadSavedWordSets().find((x) => x.id === id);
+        if (!set || !set.words?.length) return;
+        loadSavedSetIntoPractice(set);
+      });
+    });
+    listEl.querySelectorAll('.saved-set-delete').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        const set = loadSavedWordSets().find((x) => x.id === id);
+        if (!set) return;
+        if (!confirm(`Delete saved set “${set.name}”?`)) return;
+        removeSavedWordSet(id);
+        renderSavedSetsList();
+      });
+    });
+  }
+
+  function loadSavedSetIntoPractice(set) {
+    // Enter reading/custom mode with these words ready to play
+    if (menuView) menuView.style.display = 'none';
+    if (setsFlow) setsFlow.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = 'none';
+    if (customFlow) customFlow.style.display = '';
+    if (practicePanel) practicePanel.style.display = '';
+
+    customWords = (set.words || []).map((w) => ({
+      hanzi: w.hanzi,
+      pinyin: w.pinyin || '',
+      meaning: w.meaning || '',
+      level: w.level || 0,
+      userAdded: true,
+    }));
+    unselectedHanzi = new Set();
+    currentImageMap = {};
+
+    const infoEl = document.getElementById('custom-extract-info');
+    if (infoEl) {
+      infoEl.innerHTML = `Loaded saved set <strong>${String(set.name).replace(/</g, '&lt;')}</strong> (${customWords.length} words).`;
+    }
+    applyReadingToUi({
+      title: set.name,
+      description: 'Saved word set — practice these words',
+      text: customWords.map((w) => w.hanzi).join('、'),
+      level: 0,
+    });
+
+    renderExtractedList(customWords);
+    updatePictureSetOptionsForCustom();
+    updateSetPickerForMode();
+    updateCustomClearButton();
+    updateSaveSetButton();
+
+    const listSection = document.getElementById('words-list-section');
+    if (listSection) listSection.hidden = false;
+    const hint = document.querySelector('.picture-highscore-hint');
+    if (hint) hint.style.display = '';
+  }
+
+  function showSavedSets() {
+    if (menuView) menuView.style.display = 'none';
+    if (customFlow) customFlow.style.display = 'none';
+    if (setsFlow) setsFlow.style.display = 'none';
+    if (addWordsFlow) addWordsFlow.style.display = 'none';
+    if (practicePanel) practicePanel.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = '';
+    const hint = document.querySelector('.picture-highscore-hint');
+    if (hint) hint.style.display = 'none';
+    const gameScreen = document.getElementById('picture-game-screen');
+    const gameOver = document.getElementById('picture-gameover');
+    if (gameScreen) gameScreen.hidden = true;
+    if (gameOver) gameOver.hidden = true;
+    renderSavedSetsList();
+  }
+
   function showCustom() {
     if (menuView) menuView.style.display = 'none';
     if (setsFlow) setsFlow.style.display = 'none';
     if (addWordsFlow) addWordsFlow.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = 'none';
     if (customFlow) customFlow.style.display = '';
     if (practicePanel) practicePanel.style.display = '';
     // Make sure paste area is always visible for custom (also after a previous game)
@@ -2164,6 +2467,11 @@ function initPictureGame(vocabulary) {
     // Ensure only custom hsk are active
     document.querySelectorAll('#sets-flow .hsk-levels input[type="checkbox"], .sets-hsk input').forEach(c => c.checked = false);
 
+    // Refresh collection for selected HSK
+    const levelSel = document.getElementById('reading-hsk-level');
+    populateLessons(levelSel ? levelSel.value : 3);
+    setReadingSourceTab(document.querySelector('.reading-source-tab.is-active')?.dataset.source || 'collection');
+
     // Never show ready-made set picker / default word groups in custom reading mode
     updateSetPickerForMode();
     updatePictureSetOptions();
@@ -2176,12 +2484,14 @@ function initPictureGame(vocabulary) {
       listEl.hidden = true;
       listEl.innerHTML = '';
     }
+    updateSaveSetButton();
   }
 
   function showSets() {
     if (menuView) menuView.style.display = 'none';
     if (customFlow) customFlow.style.display = 'none';
     if (addWordsFlow) addWordsFlow.style.display = 'none';
+    if (savedSetsFlow) savedSetsFlow.style.display = 'none';
     if (setsFlow) setsFlow.style.display = '';
     if (practicePanel) practicePanel.style.display = '';
 
@@ -2247,6 +2557,9 @@ function initPictureGame(vocabulary) {
   const startSetsBtn = document.getElementById('start-sets-btn');
   if (startSetsBtn) startSetsBtn.addEventListener('click', showSets);
 
+  const startSavedSetsBtn = document.getElementById('start-saved-sets-btn');
+  if (startSavedSetsBtn) startSavedSetsBtn.addEventListener('click', showSavedSets);
+
   const startAddWordsBtn = document.getElementById('start-add-words-btn');
   if (startAddWordsBtn) startAddWordsBtn.addEventListener('click', showAddWords);
 
@@ -2255,6 +2568,9 @@ function initPictureGame(vocabulary) {
 
   const backSets = document.getElementById('back-from-sets');
   if (backSets) backSets.addEventListener('click', showMenu);
+
+  const backSavedSets = document.getElementById('back-from-saved-sets');
+  if (backSavedSets) backSavedSets.addEventListener('click', showMenu);
 
   const backAddWords = document.getElementById('back-from-add-words');
   if (backAddWords) backAddWords.addEventListener('click', showMenu);
@@ -2389,6 +2705,7 @@ function initPictureGame(vocabulary) {
     if (clearCustomBtn) {
       clearCustomBtn.style.display = (customWords && customWords.length > 0) ? 'inline-block' : 'none';
     }
+    updateSaveSetButton();
   }
 
   function renderExtractedList(words) {
@@ -2442,44 +2759,40 @@ function initPictureGame(vocabulary) {
 
   if (extractBtn) {
     extractBtn.addEventListener('click', () => {
-      const textarea = document.getElementById('custom-reading-text');
-      const text = textarea ? textarea.value.trim() : '';
+      // Sync paste box with active editor if user edited the loaded reading
+      const activeTa = document.getElementById('active-reading-text');
+      const pasteTa = document.getElementById('custom-reading-text');
+      if (activeTa && activeTa.value.trim() && pasteTa) {
+        pasteTa.value = activeTa.value;
+      }
+
+      const text = getActiveReadingText();
       if (!text) {
-        if (infoEl) infoEl.textContent = 'Please paste some Chinese text first.';
+        if (infoEl) infoEl.textContent = 'Load a reading or paste Chinese text first.';
         return;
       }
 
       const selectedLevels = getSelectedHSKLevels();
       customWords = extractWordsFromCustomText(text, pictureVocabulary, selectedLevels);
-      unselectedHanzi = new Set(); // reset selection, all selected by default
-      currentImageMap = {};   // previous search results no longer apply to new text
+      unselectedHanzi = new Set();
+      currentImageMap = {};
 
-      const levelDesc = selectedLevels.length === 0 
-        ? 'all levels' 
-        : 'HSK ' + selectedLevels.sort().join(', ');
+      const levelDesc = selectedLevels.length === 0
+        ? 'all levels'
+        : 'HSK ' + selectedLevels.sort((a, b) => a - b).join(', ');
 
       if (infoEl) {
         if (customWords.length === 0) {
-          infoEl.innerHTML = `No matching words found in the text for ${levelDesc}.`;
+          infoEl.innerHTML = `No matching words found in the text for ${levelDesc}. Try more HSK levels or another reading.`;
         } else {
-          infoEl.innerHTML = `✅ Extracted <strong>${customWords.length}</strong> words for ${levelDesc}.`;
+          infoEl.innerHTML = `✅ Extracted <strong>${customWords.length}</strong> words for ${levelDesc}. You can save this set or start the game.`;
         }
       }
 
-      // Show the list
       renderExtractedList(customWords);
-
-      // Clear lesson selection
-      const lessonSel = document.getElementById('lesson-select');
-      if (lessonSel) lessonSel.value = '';
-      const readingDiv = document.getElementById('lesson-reading');
-      if (readingDiv) readingDiv.hidden = true;
-
-      // Refresh game sets + hide the set picker (we use full list in extract mode)
       updatePictureSetOptionsForCustom();
       updateSetPickerForMode();
       updateCustomClearButton();
-
     });
   }
 
@@ -2495,9 +2808,168 @@ function initPictureGame(vocabulary) {
       }
       const preview = document.getElementById('picture-preview');
       if (preview) preview.hidden = true;
+      const lessonBox = document.getElementById('lesson-reading');
+      if (lessonBox) lessonBox.hidden = true;
+      const activeTa = document.getElementById('active-reading-text');
+      if (activeTa) {
+        activeTa.value = '';
+        activeTa.hidden = true;
+      }
+      const pasteTa = document.getElementById('custom-reading-text');
+      if (pasteTa) pasteTa.value = '';
+      const dailySt = document.getElementById('daily-reading-status');
+      if (dailySt) dailySt.textContent = '';
       updatePictureSetOptions();
-      updateSetPickerForMode();  // show picker again (back to sets-like behavior)
+      updateSetPickerForMode();
       updateCustomClearButton();
+    });
+  }
+
+  // Save current extracted words as a named set
+  const saveSetBtn = document.getElementById('save-word-set-btn');
+  if (saveSetBtn) {
+    saveSetBtn.addEventListener('click', () => {
+      const words = getActiveExtractedWords().length
+        ? getActiveExtractedWords()
+        : (customWords || []);
+      if (!words.length) {
+        if (infoEl) infoEl.textContent = 'Extract words first, then save a set.';
+        return;
+      }
+      const titleEl = document.getElementById('lesson-reading-title');
+      const defaultName = (titleEl && titleEl.textContent && titleEl.textContent !== 'Reading')
+        ? `${titleEl.textContent} · words`
+        : `Practice set ${new Date().toLocaleDateString()}`;
+      const name = window.prompt('Name for this word set:', defaultName);
+      if (name === null) return;
+      try {
+        const entry = addSavedWordSet({
+          name: name.trim() || defaultName,
+          words,
+          source: 'reading',
+          readingTitle: titleEl?.textContent || '',
+        });
+        if (infoEl) {
+          infoEl.innerHTML = `💾 Saved <strong>${entry.words.length}</strong> words as “${String(entry.name).replace(/</g, '&lt;')}”. Open <em>My saved word sets</em> from the menu anytime.`;
+        }
+      } catch (err) {
+        if (infoEl) infoEl.textContent = err.message || String(err);
+      }
+    });
+  }
+
+  // ---- Reading source tabs + collection / daily ----
+  document.querySelectorAll('.reading-source-tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      setReadingSourceTab(tab.dataset.source || 'collection');
+    });
+  });
+
+  const readingLevelSel = document.getElementById('reading-hsk-level');
+  if (readingLevelSel) {
+    readingLevelSel.addEventListener('change', () => {
+      populateLessons(readingLevelSel.value);
+      setExtractLevelsUpTo(Number(readingLevelSel.value) || 3);
+      const dailySt = document.getElementById('daily-reading-status');
+      if (dailySt) dailySt.textContent = '';
+    });
+  }
+
+  const loadCollectionBtn = document.getElementById('load-collection-reading');
+  if (loadCollectionBtn) {
+    loadCollectionBtn.addEventListener('click', () => {
+      const sel = document.getElementById('lesson-select');
+      const id = sel ? sel.value : '';
+      if (!id) {
+        if (infoEl) infoEl.textContent = 'Choose a reading from the list first.';
+        return;
+      }
+      const reading = typeof getReadingById === 'function'
+        ? getReadingById(id)
+        : getReadingCollection().find((r) => r.id === id);
+      if (!reading) {
+        if (infoEl) infoEl.textContent = 'Reading not found.';
+        return;
+      }
+      applyReadingToUi(reading);
+      customWords = [];
+      unselectedHanzi = new Set();
+      if (listEl) {
+        listEl.hidden = true;
+        listEl.innerHTML = '';
+      }
+      if (infoEl) {
+        infoEl.innerHTML = `Loaded <strong>${reading.title}</strong> (HSK ${reading.level}). Click <em>Extract words</em> to practice.`;
+      }
+      updateCustomClearButton();
+    });
+  }
+
+  const loadDailyBtn = document.getElementById('load-daily-reading');
+  if (loadDailyBtn) {
+    loadDailyBtn.addEventListener('click', async () => {
+      const level = Number(document.getElementById('reading-hsk-level')?.value) || 3;
+      const statusEl = document.getElementById('daily-reading-status');
+      loadDailyBtn.disabled = true;
+      if (statusEl) statusEl.textContent = 'Loading today’s reading…';
+      if (infoEl) infoEl.textContent = '';
+      try {
+        const reading = await loadDailyReadingForLevel(level, pictureVocabulary);
+        applyReadingToUi(reading);
+        customWords = [];
+        unselectedHanzi = new Set();
+        if (listEl) {
+          listEl.hidden = true;
+          listEl.innerHTML = '';
+        }
+        const srcNote = reading.source === 'wikipedia'
+          ? 'from the open web (Chinese Wikipedia)'
+          : 'from the graded collection (web text unavailable or too hard for this HSK)';
+        const cacheNote = reading.fromCache ? ' · cached for today' : '';
+        if (statusEl) {
+          statusEl.innerHTML = `✅ ${srcNote}${cacheNote}. Same text all day for HSK ${level}.`;
+        }
+        if (infoEl) {
+          infoEl.innerHTML = `Loaded <strong>${String(reading.title).replace(/</g, '&lt;')}</strong>. Click <em>Extract words</em> to practice.`;
+        }
+        updateCustomClearButton();
+      } catch (err) {
+        if (statusEl) statusEl.textContent = err.message || 'Could not load daily reading.';
+      } finally {
+        loadDailyBtn.disabled = false;
+      }
+    });
+  }
+
+  // Keep active editor in sync when user types in paste tab
+  const pasteTaSync = document.getElementById('custom-reading-text');
+  if (pasteTaSync) {
+    pasteTaSync.addEventListener('input', () => {
+      const activeTa = document.getElementById('active-reading-text');
+      const box = document.getElementById('lesson-reading');
+      if (activeTa) {
+        activeTa.value = pasteTaSync.value;
+        activeTa.hidden = !pasteTaSync.value.trim();
+      }
+      if (box && pasteTaSync.value.trim()) {
+        box.hidden = false;
+        const titleEl = document.getElementById('lesson-reading-title');
+        const descEl = document.getElementById('lesson-reading-desc');
+        const bodyEl = document.getElementById('lesson-reading-body');
+        if (titleEl) titleEl.textContent = 'Your text';
+        if (descEl) descEl.textContent = 'Pasted reading';
+        if (bodyEl) bodyEl.textContent = pasteTaSync.value;
+      }
+    });
+  }
+
+  const activeTaSync = document.getElementById('active-reading-text');
+  if (activeTaSync) {
+    activeTaSync.addEventListener('input', () => {
+      const pasteTa = document.getElementById('custom-reading-text');
+      const bodyEl = document.getElementById('lesson-reading-body');
+      if (pasteTa) pasteTa.value = activeTaSync.value;
+      if (bodyEl) bodyEl.textContent = activeTaSync.value;
     });
   }
 
@@ -2509,6 +2981,7 @@ function initPictureGame(vocabulary) {
   // Level quick buttons
   const allBtn = document.getElementById('select-all-levels');
   const noneBtn = document.getElementById('clear-levels');
+  const upToBtn = document.getElementById('levels-up-to-reading');
   if (allBtn) {
     allBtn.addEventListener('click', () => {
       document.querySelectorAll('.custom-reading .hsk-levels input[type="checkbox"]').forEach(cb => cb.checked = true);
@@ -2519,22 +2992,98 @@ function initPictureGame(vocabulary) {
       document.querySelectorAll('.custom-reading .hsk-levels input[type="checkbox"]').forEach(cb => cb.checked = false);
     });
   }
+  if (upToBtn) {
+    upToBtn.addEventListener('click', () => {
+      const lv = Number(document.getElementById('reading-hsk-level')?.value) || 3;
+      setExtractLevelsUpTo(lv);
+    });
+  }
 
   // Initial UI state
+  populateLessons(document.getElementById('reading-hsk-level')?.value || 3);
+  setReadingSourceTab('collection');
   updateCustomClearButton();
   const initList = document.getElementById('extracted-words-list');
   if (initList) initList.hidden = true;
 }
 
-function populateLessons() {
+function populateLessons(level) {
   const sel = document.getElementById('lesson-select');
   if (!sel) return;
-  // Clear previous (except placeholder)
+  const hsk = Number(level) || Number(document.getElementById('reading-hsk-level')?.value) || 3;
   while (sel.options.length > 1) sel.remove(1);
-  LESSONS.forEach(lesson => {
+
+  const list = typeof getReadingsForLevel === 'function'
+    ? getReadingsForLevel(hsk)
+    : getReadingCollection().filter((r) => Number(r.level) === hsk);
+
+  list.forEach((lesson) => {
     const opt = document.createElement('option');
     opt.value = lesson.id;
-    opt.textContent = `${lesson.title} (HSK ${lesson.level})`;
+    opt.textContent = lesson.title + (lesson.description ? ` — ${lesson.description}` : '');
     sel.appendChild(opt);
+  });
+
+  if (!list.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No readings for this level yet';
+    opt.disabled = true;
+    sel.appendChild(opt);
+  }
+}
+
+/** Put reading text into the shared editor and show the lesson box. */
+function applyReadingToUi(reading) {
+  const box = document.getElementById('lesson-reading');
+  const titleEl = document.getElementById('lesson-reading-title');
+  const descEl = document.getElementById('lesson-reading-desc');
+  const bodyEl = document.getElementById('lesson-reading-body');
+  const activeTa = document.getElementById('active-reading-text');
+  const pasteTa = document.getElementById('custom-reading-text');
+
+  if (!reading || !reading.text) return;
+
+  if (titleEl) titleEl.textContent = reading.title || 'Reading';
+  if (descEl) {
+    descEl.textContent = reading.description || (reading.level ? `HSK ${reading.level}` : '');
+  }
+  if (bodyEl) bodyEl.textContent = reading.text;
+  if (activeTa) {
+    activeTa.value = reading.text;
+    activeTa.hidden = false;
+  }
+  if (pasteTa) pasteTa.value = reading.text;
+  if (box) box.hidden = false;
+
+  // Keep extract level checkboxes aligned with reading level (1..N)
+  const maxLv = Number(reading.level) || Number(document.getElementById('reading-hsk-level')?.value) || 3;
+  setExtractLevelsUpTo(maxLv);
+}
+
+function setExtractLevelsUpTo(maxLevel) {
+  const max = Number(maxLevel) || 3;
+  document.querySelectorAll('.custom-reading .hsk-levels input[type="checkbox"]').forEach((cb) => {
+    cb.checked = Number(cb.value) <= max;
+  });
+}
+
+function getActiveReadingText() {
+  const activeTa = document.getElementById('active-reading-text');
+  if (activeTa && activeTa.value.trim()) return activeTa.value.trim();
+  const pasteTa = document.getElementById('custom-reading-text');
+  return pasteTa ? pasteTa.value.trim() : '';
+}
+
+function setReadingSourceTab(source) {
+  const tabs = document.querySelectorAll('.reading-source-tab');
+  tabs.forEach((t) => t.classList.toggle('is-active', t.dataset.source === source));
+  const panels = {
+    collection: document.getElementById('reading-source-collection'),
+    daily: document.getElementById('reading-source-daily'),
+    paste: document.getElementById('reading-source-paste'),
+  };
+  Object.entries(panels).forEach(([key, el]) => {
+    if (el) el.hidden = key !== source;
   });
 }
